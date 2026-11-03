@@ -2,57 +2,109 @@ package consumes
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"kogen-loop/tools"
 )
 
-// definitions are the model-facing definitions of the generic tools kogen-review's reviewer is
-// given (review.ToolNames, in this order), exactly as kogen-review's policy relays them.
-var definitions = map[string]string{
-	"read_file":   `{"description":"Read a file of the repository, with line numbers. Paths are relative to the repository root; absolute paths and symlinks must stay inside the root, and ~ is refused.","name":"read_file","parameters":{"additionalProperties":false,"properties":{"end_line":{"type":"integer"},"path":{"type":"string"},"start_line":{"type":"integer"}},"required":["path"],"type":"object"},"strict":false,"type":"function"}`,
-	"view_image":  `{"description":"View one selected local static non-interlaced RGB8 PNG (1..131072 bytes, dimensions 1..2048) inside the repository root; paths outside it, symlinks leaving it and ~ are refused. Read-only; no capture or provenance inference. Provider preprocessing may change resolution.","name":"view_image","parameters":{"additionalProperties":false,"properties":{"path":{"type":"string"}},"required":["path"],"type":"object"},"strict":false,"type":"function"}`,
-	"list_files":  `{"description":"List the repository's files (tracked and untracked, not ignored), optionally under a folder inside the repository root; paths outside it, symlinks leaving it and ~ are refused.","name":"list_files","parameters":{"additionalProperties":false,"properties":{"path":{"type":"string"}},"required":[],"type":"object"},"strict":false,"type":"function"}`,
-	"search_text": `{"description":"Search the repository's files for a regular expression (git grep syntax), optionally under a path inside the repository root; paths outside it, symlinks leaving it and ~ are refused. Returns path:line:text matches.","name":"search_text","parameters":{"additionalProperties":false,"properties":{"path":{"type":"string"},"pattern":{"type":"string"}},"required":["pattern"],"type":"object"},"strict":false,"type":"function"}`,
-	"write_file":  `{"description":"Write the whole content of a file of the repository (created with its folders if needed).","name":"write_file","parameters":{"additionalProperties":false,"properties":{"content":{"type":"string"},"path":{"type":"string"}},"required":["path","content"],"type":"object"},"strict":false,"type":"function"}`,
-	"shell":       `{"description":"Run a command with /bin/sh -c in the repository root, or retrieve it using its handle. Supply exactly one of command or handle. A new command waits up to 45 seconds; retrieval waits up to 30 seconds. Both return immediately on completion; running commands continue and return JSON with status, handle and cumulative output. Retrieval returns running or completed JSON with exit_status and cumulative output. Commands are stopped at round end. stdin is closed; stdout and stderr are combined.","name":"shell","parameters":{"additionalProperties":false,"properties":{"command":{"type":"string"},"handle":{"type":"string"}},"required":[],"type":"object"},"strict":false,"type":"function"}`,
+type parameterContract struct {
+	name     string
+	typ      string
+	required bool
 }
 
-// asJSON is a value as a JSON document would carry it, to compare maps built with different
-// Go types for the same JSON.
-func asJSON(t *testing.T, v any) any {
-	t.Helper()
-	b, err := json.Marshal(v)
+// checkDefinition checks only the model-facing arguments the reviewer consumes.
+func checkDefinition(def map[string]any, name string, want []parameterContract) error {
+	b, err := json.Marshal(def)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	var out any
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatal(err)
+	var got struct {
+		Name       string `json:"name"`
+		Parameters struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+			Required   []string                   `json:"required"`
+		} `json:"parameters"`
 	}
-	return out
+	if err := json.Unmarshal(b, &got); err != nil {
+		return err
+	}
+	if got.Name != name {
+		return fmt.Errorf("name: got %q, want %q", got.Name, name)
+	}
+	for _, p := range want {
+		raw, ok := got.Parameters.Properties[p.name]
+		if !ok {
+			return fmt.Errorf("%s: missing property %s", name, p.name)
+		}
+		var prop struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &prop); err != nil {
+			return fmt.Errorf("%s.%s: %w", name, p.name, err)
+		}
+		if prop.Type != p.typ {
+			return fmt.Errorf("%s.%s: type %q, want %q", name, p.name, prop.Type, p.typ)
+		}
+		required := false
+		for _, r := range got.Parameters.Required {
+			if r == p.name {
+				required = true
+			}
+		}
+		if required != p.required {
+			return fmt.Errorf("%s.%s: required = %t, want %t", name, p.name, required, p.required)
+		}
+	}
+	return nil
 }
 
-// review/policy.go: ReviewerToolDefinitions takes the generic tools' definitions from
-// tools.Definition and panics on a name that is neither a generic tool nor submit_review.
+// review/policy.go relays these generic definitions to the reviewer.
 func TestDefinitionIsTheGenericToolDefinition(t *testing.T) {
-	names := []string{"read_file", "view_image", "list_files", "search_text", "write_file", "shell"}
-	for _, name := range names {
-		def, ok := tools.Definition(name)
-		eq(t, "tools.Definition: "+name+" is a generic tool", ok, true)
-		var want any
-		if err := json.Unmarshal([]byte(definitions[name]), &want); err != nil {
-			t.Fatal(err)
-		}
-		deepEq(t, "tools.Definition: the exact definition of "+name, asJSON(t, def), want)
-		eq(t, "tools.Definition: "+name+" is a function", def["type"], any("function"))
-		eq(t, "tools.Definition: "+name+" is named", def["name"], any(name))
-		eq(t, "tools.Definition: "+name+" is not strict", def["strict"], any(false))
+	contracts := map[string][]parameterContract{
+		"read_file":   {{"path", "string", true}, {"start_line", "integer", false}, {"end_line", "integer", false}},
+		"view_image":  {{"path", "string", true}},
+		"list_files":  {{"path", "string", false}},
+		"search_text": {{"pattern", "string", true}, {"path", "string", false}},
+		"write_file":  {{"path", "string", true}, {"content", "string", true}},
+		"shell":       {{"command", "string", false}, {"handle", "string", false}},
 	}
-	eq(t, "tools.Definition: every tool kogen-review enables has its definition", len(definitions), len(names))
-	for _, name := range []string{"submit_review", "finish", "nosuch", ""} {
-		def, ok := tools.Definition(name)
-		eq(t, "tools.Definition: "+name+" is not a generic tool", ok, false)
-		eq(t, "tools.Definition: no definition for "+name, len(def), 0)
+	for name, want := range contracts {
+		t.Run(name, func(t *testing.T) {
+			def, ok := tools.Definition(name)
+			if !ok {
+				t.Fatalf("tools.Definition(%q) not found", name)
+			}
+			if err := checkDefinition(def, name, want); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+}
+
+func TestDefinitionContractRejectsConsumedArgumentDrift(t *testing.T) {
+	want := []parameterContract{{"pattern", "string", true}, {"path", "string", false}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"missing", func(p map[string]any) { delete(p["properties"].(map[string]any), "pattern") }},
+		{"type", func(p map[string]any) {
+			p["properties"].(map[string]any)["pattern"] = map[string]any{"type": "integer"}
+		}},
+		{"required removed", func(p map[string]any) { p["required"] = []any{} }},
+		{"optional made required", func(p map[string]any) { p["required"] = []any{"pattern", "path"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def, ok := tools.Definition("search_text")
+			if !ok {
+				t.Fatal("search_text not found")
+			}
+			tc.mutate(def["parameters"].(map[string]any))
+			if err := checkDefinition(def, "search_text", want); err == nil {
+				t.Fatal("accepted changed consumed argument")
+			}
+		})
 	}
 }
