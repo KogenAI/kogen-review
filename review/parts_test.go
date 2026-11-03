@@ -12,7 +12,7 @@ import (
 
 // testParter is a parter over source whose complete prompt is extra bytes of framing and the
 // part's text (so a part's room is the ceiling less extra and its header).
-func testParter(source string, blocks []core.MaterialSegment, ceiling, extra int) *reviewParter {
+func testParter(source string, blocks []MaterialSegment, ceiling, extra int) *reviewParter {
 	return &reviewParter{
 		source: source, sum: core.HashHex([]byte(source)), checks: "checks passed", catalog: `[{"path":"a.txt","status":"added"}]`,
 		blocks: blocks, ceiling: ceiling, measure: func(dynamic string) int { return extra + len(dynamic) },
@@ -95,8 +95,8 @@ func TestReviewPartsFitTheCeilingInclusively(t *testing.T) {
 func TestReviewPartsKeepPathMaterialWhole(t *testing.T) {
 	const ceiling, extra, start = 10000, 0, 6000
 	filler, tail := lines(start/50, "a"), lines(100, "t")
-	build := func(block int) (*reviewParter, []core.MaterialSegment) {
-		blocks := []core.MaterialSegment{{Path: "b.txt", Kind: "file", Start: start, End: start + block}}
+	build := func(block int) (*reviewParter, []MaterialSegment) {
+		blocks := []MaterialSegment{{Path: "b.txt", Kind: "file", Start: start, End: start + block}}
 		return testParter(filler+exactly(block, "b")+tail, blocks, ceiling, extra), blocks
 	}
 	probe, _ := build(9000)
@@ -129,7 +129,7 @@ func TestReviewPartsKeepMaterialEndingAtTheLimit(t *testing.T) {
 	text := exactly(limit-start, "b")
 	text = text[:len(text)-1] + "b"
 	source := lines(start/50, "a") + text + "\n" + strings.Repeat("t", total-limit-1)
-	c := testParter(source, []core.MaterialSegment{{Path: "b.txt", Kind: "file", Start: start, End: limit}}, ceiling, 0)
+	c := testParter(source, []MaterialSegment{{Path: "b.txt", Kind: "file", Start: start, End: limit}}, ceiling, 0)
 	cuts := mustCut(t, c)
 	checkCover(t, c, cuts)
 	if cuts[0].To != limit {
@@ -173,7 +173,7 @@ func TestReviewPartsMinimumRoom(t *testing.T) {
 	for _, tc := range []struct {
 		room int
 		want bool
-	}{{core.MaterialPartBytes, true}, {core.MaterialPartBytes - 1, false}, {core.MaterialPartBytes + 1, true}} {
+	}{{MaterialPartBytes, true}, {MaterialPartBytes - 1, false}, {MaterialPartBytes + 1, true}} {
 		c := testParter(lines(5000, "x"), nil, ceiling, ceiling-tc.room-header)
 		if got := c.hasRoom(); got != tc.want {
 			t.Errorf("%d bytes of room: proceeds %v, want %v", tc.room, got, tc.want)

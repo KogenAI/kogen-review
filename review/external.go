@@ -110,7 +110,7 @@ func (x External) Review(ctx context.Context, in Input, env Env) (Result, error)
 	v := &xreview{in: in, env: env, executor: in.Executor}
 	pass := in.Evidence.Pass
 	role := in.Intent.Role
-	m, err := env.Material(pass)
+	m, err := MaterialOf(in)
 	if err != nil {
 		return Result{}, err
 	}
@@ -160,10 +160,10 @@ func reviewStop(detail string) *sys.Error {
 // reviewInParts reviews a source whose complete prompt does not fit one session: the exact
 // source is cut into ordered parts, each with its own fresh session whose complete prompt fits.
 // Mandatory material that leaves no room for source stops before anything is sent.
-func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Role, pass verify.Pass, m core.MaterialSet, authority string, whole int, dir string) (Result, error) {
+func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Role, pass verify.Pass, m MaterialSet, authority string, whole int, dir string) (Result, error) {
 	in, env := v.in, v.env
 	stable := authority + "\n" + reviewPartsTask
-	blocks, err := env.Blocks(pass.Tree, m)
+	blocks, err := materialBlocks(in.Candidate, pass.Tree, m)
 	if err != nil {
 		return Result{}, err
 	}
@@ -185,7 +185,7 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 		return Result{}, sys.Fail("candidate", "context_budget_exceeded", fmt.Sprintf(
 			"review: mandatory review prompt of executor %s is %d bytes without candidate source; fewer than %d bytes remain for source under the inclusive %d-byte ceiling; nothing was sent. "+
 				"Inspect the run evidence; ordinary Refine and new exact approval are required if the Intent, README or diagnostic context must shrink.",
-			x.desc.Name, c.mandatory(), core.MaterialPartBytes, reviewCeiling), 1)
+			x.desc.Name, c.mandatory(), MaterialPartBytes, reviewCeiling), 1)
 	}
 	cuts, err := c.cut()
 	if err != nil {
@@ -251,14 +251,14 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 	if err := ev.check(dir, s.part); err != nil {
 		return Result{}, err
 	}
-	if cur, err := env.Tree(); err != nil {
+	if cur, err := candidateTree(in.Candidate); err != nil {
 		return Result{}, err
 	} else if cur != s.pass.Tree {
 		when := "its green pass and before the review was sent"
 		if s.part > 1 {
 			when = fmt.Sprintf("the pass the approval of part %d bound and before part %d was sent", s.part-1, s.part)
 		}
-		return Result{}, custodyInvalid("the candidate changed after " + when + ": " + env.Drift(cur, s.pass.Tree))
+		return Result{}, custodyInvalid("the candidate changed after " + when + ": " + treeDrift(in.Candidate, cur, s.pass.Tree))
 	}
 
 	task := executor.Task{
@@ -388,7 +388,7 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 				return Result{}, err
 			}
 		}
-		tree, err := env.Tree()
+		tree, err := candidateTree(in.Candidate)
 		if err != nil {
 			return Result{}, err
 		}

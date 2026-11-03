@@ -167,7 +167,7 @@ func (Independent) Review(ctx context.Context, in Input, env Env) (Result, error
 	}
 	nativeTools := in.Tools.Native(ToolNames)
 	tools := reviewTools(nativeTools)
-	m, err := env.Material(pass)
+	m, err := MaterialOf(in)
 	if err != nil {
 		return Result{}, err
 	}
@@ -270,7 +270,7 @@ func (r *run) loop(ctx context.Context, pending *Verdict, tree string) (Result, 
 			if err != nil {
 				return Result{Invalid: r.invalid}, err
 			}
-			if tree, err = env.Tree(); err != nil {
+			if tree, err = candidateTree(r.in.Candidate); err != nil {
 				return Result{}, err
 			}
 			pending = &verdict
@@ -315,7 +315,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 		"Use the actual results, including failures and unrun items. Do not infer an operator\n" +
 		"explanation. Submit changes if unresolved, or explicitly approve after resolving it;\n" +
 		"edits still require ordinary external exact verification before commit.\n"
-	delivery, err := deliverySection(env, r.seenTree(), pass.Tree)
+	delivery, err := deliverySection(r.in.Candidate, r.seenTree(), pass.Tree)
 	if err != nil {
 		return Result{}, err
 	}
@@ -338,15 +338,15 @@ func (r *run) seenTree() string {
 
 // deliverySection tells the reviewer that the candidate changed after its contents were
 // delivered, with the exact diff against the seen tree. It is empty when the trees are equal.
-func deliverySection(env Env, seen, now string) (string, error) {
+func deliverySection(c Candidate, seen, now string) (string, error) {
 	if seen == now {
 		return "", nil
 	}
-	paths, err := env.Changed(seen, now)
+	paths, err := c.Repo.Changed(seen, now)
 	if err != nil {
 		return "", err
 	}
-	diff, err := env.Diff(seen, now, paths)
+	diff, err := c.Repo.Diff(seen, now, paths)
 	if err != nil {
 		return "", err
 	}
@@ -426,7 +426,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		return Result{Record: approved, Pass: final, Repairs: r.repairs}, false, nil
 	}
 
-	feedback, err := deliverySection(env, seen, final.Tree)
+	feedback, err := deliverySection(r.in.Candidate, seen, final.Tree)
 	if err != nil {
 		return Result{}, false, err
 	}
@@ -545,7 +545,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				edits := call.Name == "write_file" || call.Name == "shell"
 				before := ""
 				if edits {
-					if before, err = env.Tree(); err != nil {
+					if before, err = candidateTree(r.in.Candidate); err != nil {
 						return Verdict{}, err
 					}
 				}
@@ -554,7 +554,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 					return Verdict{}, err
 				}
 				if edits {
-					after, err := env.Tree()
+					after, err := candidateTree(r.in.Candidate)
 					if err != nil {
 						return Verdict{}, err
 					}
@@ -699,7 +699,7 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 		if st, err := os.Stat(filepath.Join(r.in.Candidate.Root, path)); err == nil && st.Mode().IsRegular() {
 			continue
 		}
-		if !env.InStart(path) {
+		if !inStart(r.in.Candidate, path) {
 			problems = append(problems, path+" is not a file of the repository")
 		}
 	}

@@ -46,15 +46,21 @@ const sessionJSON = `{"role":{"Provider":"chatgpt","Model":"fixture-review-model
 	`"tree":"1111111111111111111111111111111111111111","seen_tree":"2222222222222222222222222222222222222222",` +
 	`"tools":[{"name":"read_file"}],"rejected_verdicts":1,"no_tool_reminders":1,"remind":true,"prev_unread":2,"reopened":true,"repaired":true}`
 
+// The trees fullSession names: a session's bytes do not depend on the trees existing.
+const (
+	sessionTree = "1111111111111111111111111111111111111111"
+	sessionSeen = "2222222222222222222222222222222222222222"
+)
+
 func fullSession() review.Session {
 	finding := map[string]any{"path": "app.txt", "line": json.Number("3"), "severity": "blocking", "message": "m"}
 	return review.Session{
 		Role:     reviewRole,
 		Input:    []any{map[string]any{"role": "user", "content": "x < y & z"}},
 		Usage:    core.Tokens{Input: core.Count(10), Cached: core.Count(0), Output: core.Count(2)},
-		Attempts: []review.Submitted{{Pass: 1, Tree: greenTree, Verdict: "changes", Findings: []map[string]any{finding}}},
+		Attempts: []review.Submitted{{Pass: 1, Tree: sessionTree, Verdict: "changes", Findings: []map[string]any{finding}}},
 		Verdict:  &review.Verdict{Verdict: "changes", Findings: []map[string]any{finding}},
-		Tree:     greenTree, Seen: otherTree, Tools: []any{map[string]any{"name": "read_file"}},
+		Tree:     sessionTree, Seen: sessionSeen, Tools: []any{map[string]any{"name": "read_file"}},
 		Rejected: 1, NoTool: 1, Remind: true, PrevUnread: 2, Reopened: true, Repaired: true,
 	}
 }

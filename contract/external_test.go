@@ -68,8 +68,12 @@ func TestExternalReviewApprovesInItsOwnSession(t *testing.T) {
 	eq(t, "material-json delivered", m.Delivered, true)
 	eq(t, "material-json delivered round", m.Round, 1)
 	eq(t, "material-json session", m.Session, "review-session-1")
-	eq(t, "material-json source bytes", m.Source.Bytes, len("fixture source"))
-	eq(t, "material-json source sha256", m.Source.SHA256, core.HashHex([]byte("fixture source")))
+	material, err := review.MaterialOf(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "material-json source bytes", m.Source.Bytes, len(material.Source))
+	eq(t, "material-json source sha256", m.Source.SHA256, core.HashHex([]byte(material.Source)))
 	for _, name := range []string{"review-1-authority.txt", "review-1-source.txt", "review-1-material.json"} {
 		st, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {

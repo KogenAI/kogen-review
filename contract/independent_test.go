@@ -164,7 +164,7 @@ func TestIndependentResumeJudgesTheSavedVerdict(t *testing.T) {
 func TestIndependentApprovalOfAnUnverifiedTreeIsVerifiedFirst(t *testing.T) {
 	t.Parallel()
 	in, h := newReview(t)
-	h.tree = otherTree // the candidate changed after the green pass
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText) // the candidate changed after the green pass
 	h.answers = []*provider.Response{submitReview(`{"verdict":"approve","findings":[]}`), submitReview(`{"verdict":"approve","findings":[]}`)}
 	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
 	ap, err := review.Independent{}.Review(context.Background(), in, h)
@@ -181,7 +181,7 @@ func TestIndependentApprovalOfAnUnverifiedTreeIsVerifiedFirst(t *testing.T) {
 	last, _ := sent[len(sent)-1].(map[string]any)
 	content, _ := last["content"].(string)
 	if !strings.HasPrefix(content, "Your verdict was not applied: the candidate changed after its contents were delivered to you, other than through your own Kogen tool calls: app.txt.\n") ||
-		!strings.Contains(content, "fixture diff") {
+		!strings.Contains(content, "diff --git a/app.txt b/app.txt") || !strings.Contains(content, "-candidate\n+"+otherText) {
 		t.Errorf("independent-exact-tree feedback: %q", content)
 	}
 	if !slices.Contains(h.progress, "kogen: review 1: the candidate changed after its contents were delivered; returning the changes to the reviewer") {

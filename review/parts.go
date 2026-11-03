@@ -6,7 +6,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
 	"kogen-loop/tools"
 )
@@ -57,7 +56,7 @@ type reviewParter struct {
 	catalog string
 	// blocks are the byte ranges of the source holding one path's material: its block in the diff
 	// and its heading and full text, in source order.
-	blocks []core.MaterialSegment
+	blocks []MaterialSegment
 	// measure is the executor's exact first-prompt length for the review brief with this dynamic
 	// text and the parts' stable text.
 	measure func(dynamic string) int
@@ -78,8 +77,8 @@ func (c *reviewParter) prompt(k, n, from, to int) int {
 func (c *reviewParter) mandatory() int { return c.prompt(1, 1, 0, 0) }
 
 // hasRoom reports whether the mandatory prompt leaves at least one pinned source part
-// (core.MaterialPartBytes) under the ceiling for source.
-func (c *reviewParter) hasRoom() bool { return c.ceiling-c.mandatory() >= core.MaterialPartBytes }
+// (MaterialPartBytes) under the ceiling for source.
+func (c *reviewParter) hasRoom() bool { return c.ceiling-c.mandatory() >= MaterialPartBytes }
 
 // maxTo is the largest end of a part that starts at from such that its complete prompt fits the
 // ceiling (equality fits), or -1 when even an empty slice does not.

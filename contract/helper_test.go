@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 
+	gitpkg "github.com/KogenAI/kogen-coordinator/git"
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
@@ -52,11 +52,15 @@ func wantError(t testing.TB, item string, err error, class, reason string) *sys.
 	return e
 }
 
-// The fixture's trees: the green candidate tree of the pass under review and another tree.
-const (
-	greenTree = "1111111111111111111111111111111111111111"
-	otherTree = "2222222222222222222222222222222222222222"
+// The fixture's trees: the green candidate tree of the pass under review and another tree, the
+// candidate after a further edit of app.txt (otherText). Git names a tree by its contents alone,
+// so every fixture checkout has the same two.
+var (
+	greenTree, otherTree string
+	treesOnce            sync.Once
 )
+
+const otherText = "candidate, edited after the green pass\n"
 
 // reviewRole is the review model of the fixture's configuration.
 var reviewRole = project.Role{Provider: "chatgpt", Model: "fixture-review-model", Effort: "medium"}
@@ -64,15 +68,14 @@ var reviewRole = project.Role{Provider: "chatgpt", Model: "fixture-review-model"
 // greenPass is the green pass of greenTree a review is given.
 func greenPass() verify.Pass { return verify.Pass{N: 1, Clean: true, Green: true, Tree: greenTree} }
 
-// fakeEnv is a review's Env as a test scripts it: a candidate tree, the model's answers, the
-// verification passes and the material. It records what the reviewer asks of its caller. No
-// Build is involved: the input is a saved candidate in a temporary checkout and a run folder.
+// fakeEnv is a review's Env as a test scripts it: the model's answers and the verification
+// passes. It records what the reviewer asks of its caller. No Build is involved: the input is a
+// saved candidate in a temporary Git checkout and a run folder.
 type fakeEnv struct {
 	t   *testing.T
 	dir string
 
 	mu        sync.Mutex
-	tree      string
 	answers   []*provider.Response // one per Request, in order
 	requests  []review.Request
 	stages    []string            // the stage of every Save and "tool" for every Boundary, in order
@@ -85,25 +88,52 @@ type fakeEnv struct {
 	repairs   int
 	executor  *core.ExecutorState
 	unread    []string // Unread's answer
-	material  core.MaterialSet
-	materials int // Delivered calls
+	materials int      // Delivered calls
 }
 
-// newReview is a review of a saved candidate in a temporary checkout with a run folder: its
-// Input (review number 1 of greenPass) and the fake Env serving it.
+// newReview is a review of a saved candidate in a temporary Git checkout with a run folder: its
+// Input (review number 1 of greenPass) and the fake Env serving it. The start commit holds
+// app.txt, deleted.txt and the approved Intent's feature; the candidate (greenTree, in the
+// checkout) changed app.txt and deleted deleted.txt.
 func newReview(t *testing.T) (review.Input, *fakeEnv) {
 	t.Helper()
 	root := t.TempDir()
+	git(t, root, nil, "init", "-q", "-b", "main")
+	writeFile(t, filepath.Join(root, ".gitignore"), ".kogen/local/\n")
+	writeFile(t, filepath.Join(root, "app.txt"), "start\n")
+	writeFile(t, filepath.Join(root, "deleted.txt"), "gone\n")
+	writeFile(t, filepath.Join(root, project.FeaturePath("fixture")), "Feature: Fixture\n")
+	git(t, root, nil, "add", "-A")
+	git(t, root, nil, "commit", "-q", "-m", "start")
+	start := git(t, root, nil, "rev-parse", "HEAD")
 	writeFile(t, filepath.Join(root, "app.txt"), "candidate\n")
+	if err := os.Remove(filepath.Join(root, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	// Both trees are written to this checkout's repository (the review reads them there).
+	repo := gitpkg.New(root, nil)
+	green, err := repo.Tree(start, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "app.txt"), otherText)
+	other, err := repo.Tree(start, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "app.txt"), "candidate\n")
+	treesOnce.Do(func() { greenTree, otherTree = green, other })
+	if green != greenTree || other != otherTree {
+		t.Fatalf("the fixture's trees differ between checkouts: %s %s, %s %s", green, other, greenTree, otherTree)
+	}
 	dir := filepath.Join(root, ".kogen/local/runs/fixture-run")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := &fakeEnv{t: t, dir: dir, tree: greenTree,
-		material: core.MaterialSet{Authority: "fixture authority", Source: "fixture source", Files: []map[string]any{{"path": "app.txt"}}}}
+	env := &fakeEnv{t: t, dir: dir}
 	in := review.Input{
-		Candidate: review.Candidate{Root: root, Start: otherTree, Tree: greenTree},
-		Intent:    review.Intent{Role: reviewRole},
+		Candidate: review.Candidate{Root: root, Repo: repo, Start: start, Tree: greenTree},
+		Intent:    review.Intent{Slug: "fixture", Text: "# Fixture intent\n", Role: reviewRole},
 		Evidence:  review.Evidence{Pass: greenPass()},
 		Tools: review.Tools{
 			Native: func(enabled []string) *tools.Tools { return &tools.Tools{Root: root, Enabled: enabled} },
@@ -153,8 +183,6 @@ func (h *fakeEnv) Err() error                         { return nil }
 func (h *fakeEnv) BaselineIntact() error              { return nil }
 func (h *fakeEnv) Comparison() []string               { return nil }
 func (h *fakeEnv) Custody() error                     { return nil }
-func (h *fakeEnv) Tree() (string, error)              { return h.tree, nil }
-func (h *fakeEnv) InStart(path string) bool           { return path == "deleted.txt" }
 
 // Write writes a file of the run folder as JSON.
 func (h *fakeEnv) Write(name string, data any) error {
@@ -163,16 +191,6 @@ func (h *fakeEnv) Write(name string, data any) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(h.dir, name), b, 0o600)
-}
-
-func (h *fakeEnv) Changed(from, to string) ([]string, error) { return []string{"app.txt"}, nil }
-
-func (h *fakeEnv) Diff(from, to string, paths []string) (string, error) {
-	return "fixture diff of " + strings.Join(paths, ", "), nil
-}
-
-func (h *fakeEnv) Drift(observed, green string) string {
-	return "the tree is " + observed + ", not " + green
 }
 
 func (h *fakeEnv) Feedback(pass verify.Pass, completion string) string {
@@ -188,14 +206,7 @@ func (h *fakeEnv) Verify(context.Context) (verify.Pass, error) {
 	return p, nil
 }
 
-func (h *fakeEnv) Material(verify.Pass) (core.MaterialSet, error) { return h.material, nil }
-
-func (h *fakeEnv) Blocks(string, core.MaterialSet) ([]core.MaterialSegment, error) {
-	h.t.Fatal("Blocks was not expected")
-	return nil, nil
-}
-
-func (h *fakeEnv) Prepare(tree string, m core.MaterialSet, role project.Role, instructions string, defs, diagnostic []any) ([]any, error) {
+func (h *fakeEnv) Prepare(tree string, m review.MaterialSet, role project.Role, instructions string, defs, diagnostic []any) ([]any, error) {
 	return []any{map[string]any{"role": "user", "content": m.Authority + "\n" + m.Source}}, nil
 }
 

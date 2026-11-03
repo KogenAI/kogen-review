@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/KogenAI/kogen-coordinator/git"
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
@@ -15,10 +16,12 @@ import (
 // Review's contract. A review is given a saved candidate, the exact approved Intent, the
 // verification evidence of that candidate, the tools it is permitted and, to resume, its own
 // checkpoint (Input). It returns its verdict, its findings and its repairs (Result). Nothing of
-// its caller's state is handed to it: what a review needs while it runs — the model conversation
-// with its caller's bookkeeping, the verification of its own repairs, the candidate's trees and
-// the record of its progress — it asks of Env, which a Build provides over its own state and a
-// saved-candidate harness provides without any Build.
+// its caller's state is handed to it. A review makes its own material from its Input
+// (MaterialOf) and reads the candidate's trees, diffs and start files from the candidate's
+// checkout. What else it needs while it runs — the model conversation with its caller's
+// bookkeeping and working window, the verification of its own repairs and the record of its
+// progress — it asks of Env, which a Build provides over its own state and a saved-candidate
+// harness provides without any Build.
 
 // Reviewer is an independent review and repair of a green candidate (chapter 06): the native
 // reviewer (Independent) or one served by an external executor (External).
@@ -48,10 +51,12 @@ type Input struct {
 	Run Run
 }
 
-// Candidate is the saved candidate a review judges: the checkout holding it, the commit it was
-// built on and its tree (the tree of Evidence.Pass for a fresh review).
+// Candidate is the saved candidate a review judges: the checkout holding it and that checkout's
+// Git repository, the commit it was built on and its tree (the tree of Evidence.Pass for a fresh
+// review). The review reads the candidate's trees, diffs and start files through Repo.
 type Candidate struct {
 	Root  string
+	Repo  *git.Repo
 	Start string
 	Tree  string
 	// Protected are the approved files the candidate may not change and Excluded the paths
@@ -63,24 +68,37 @@ type Candidate struct {
 	Builder string
 }
 
-// Intent is the exact approved Intent the candidate is judged against: the approval's bytes
-// (nil when they cannot be read), the source provenance it rests on, the review role, and the
-// staged plan's position for the review ("" without a plan). The Intent's text reaches the
-// reviewer as the authority of its material (Env.Material).
+// Intent is the exact approved Intent the candidate is judged against: its slug (its
+// acceptance feature and model are the approved files of the checkout) and text, the approval's
+// bytes (nil when they cannot be read), the source provenance it rests on, the review role, and
+// the staged plan's position for the review ("" without a plan). The Intent reaches the reviewer
+// as the authority of its material (MaterialOf).
 type Intent struct {
+	Slug     string
+	Text     string
 	Approval []byte
 	Source   *project.SourceRef
 	Role     project.Role
 	Plan     string
 }
 
-// Evidence is the verification evidence of the candidate: its green pass, the caller's frozen
-// diagnostic messages followed by the check baseline of that pass, and whether a check failed
-// before the Build (Env.Comparison accounts for it).
+// Evidence is the verification evidence of the candidate: its green pass, the configured
+// commands that verify it, the caller's frozen diagnostic messages followed by the check
+// baseline of that pass, and whether a check failed before the Build (Env.Comparison accounts
+// for it).
 type Evidence struct {
 	Pass            verify.Pass
+	Commands        Commands
 	Diagnostic      []any
 	BaselineFailing bool
+}
+
+// Commands are the project's configured commands, as the review material states them: the
+// fixers, the checks and the acceptance command ("" when none is configured).
+type Commands struct {
+	Fix        []string
+	Checks     []project.Check
+	Acceptance string
 }
 
 // Tools are the tools a review is permitted.
@@ -165,13 +183,9 @@ type Env interface {
 	// Request sends one request of the reviewer's conversation with the caller's bookkeeping
 	// (working context, checkpoint, usage, provider attempts, image delivery).
 	Request(ctx context.Context, r Request) (*provider.Response, []any, error)
-	// Material gathers the review material of a green pass; Blocks locates each changed path's
-	// material in the source of the parts route.
-	Material(pass verify.Pass) (core.MaterialSet, error)
-	Blocks(tree string, m core.MaterialSet) ([]core.MaterialSegment, error)
-	// Prepare makes the opening conversation of a fresh review of m in the working window: the
-	// observations of an earlier review are not carried into it.
-	Prepare(tree string, m core.MaterialSet, role project.Role, instructions string, defs, diagnostic []any) ([]any, error)
+	// Prepare makes the opening conversation of a fresh review of m, the material the review made,
+	// in the working window: the observations of an earlier review are not carried into it.
+	Prepare(tree string, m MaterialSet, role project.Role, instructions string, defs, diagnostic []any) ([]any, error)
 	// Unread are the pinned parts a conversation has not read; Delivered records the delivery;
 	// Prefill appends the pinned source to a reopened conversation; Custody checks every archived
 	// working-context window.
@@ -180,14 +194,6 @@ type Env interface {
 	Prefill(role project.Role, instructions string, defs, input []any) ([]any, error)
 	Custody() error
 
-	// Tree is the candidate tree of the checkout now; Changed and Diff compare two trees; InStart
-	// reports whether path is a file of the candidate's start commit; Drift states how a tree
-	// differs from the green tree of its pass.
-	Tree() (string, error)
-	Changed(from, to string) ([]string, error)
-	Diff(from, to string, paths []string) (string, error)
-	InStart(path string) bool
-	Drift(observed, green string) string
 	// Verify runs one verification pass over the checkout's candidate (the reviewer's repairs);
 	// Feedback is what goes back after a red pass (completion names the tool to call when
 	// done); BaselineIntact guards the approved baseline.
