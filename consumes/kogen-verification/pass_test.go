@@ -21,8 +21,7 @@ func eqs(t *testing.T, item string, got, want []string) {
 	}
 }
 
-// cmd/kogen-review builds the pass of a saved candidate as verify.Pass{N: 1, Clean: true,
-// Green: true, Tree: tree}; the reviewer reads those fields back.
+// Pass fields retain the producer format consumed by the reviewer.
 func TestPassFields(t *testing.T) {
 	const tree = "0123456789abcdef0123456789abcdef01234567"
 	p := verify.Pass{N: 1, Clean: true, Green: true, Tree: tree}

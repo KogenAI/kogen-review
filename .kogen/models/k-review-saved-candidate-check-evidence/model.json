@@ -1,0 +1,10 @@
+{
+  "None": false,
+  "Path": ".kogen/models/k-review-saved-candidate-check-evidence/model.qnt",
+  "Invariants": [
+    "ExactGreen"
+  ],
+  "Seed": "1",
+  "Samples": "30",
+  "Steps": "8"
+}

@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/KogenAI/kogen-coordinator/git"
 	"github.com/KogenAI/kogen-coordinator/project"
@@ -92,9 +93,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if _, err := os.ReadFile(filepath.Join(abs, project.FeaturePath(*slug))); err != nil {
 		return refuse(err)
 	}
+	cfg := &project.Config{}
 	var commands review.Commands
 	if _, err := os.Stat(filepath.Join(abs, project.ConfigPath)); err == nil {
-		cfg, err := project.LoadConfig(abs)
+		cfg, err = project.LoadConfig(abs)
 		if err != nil {
 			return refuse(err)
 		}
@@ -110,6 +112,33 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return refuse(fmt.Errorf("-start %s is not a commit of %s", *start, abs))
 	}
+	intent, err := project.LoadIntent(abs, *slug)
+	if err != nil {
+		return refuse(err)
+	}
+	feature, err := os.ReadFile(filepath.Join(abs, project.FeaturePath(*slug)))
+	if err != nil {
+		return refuse(err)
+	}
+	expected, err := project.ParseGherkin(string(feature))
+	if err != nil {
+		return refuse(err)
+	}
+	paths, err := project.Baseline(abs, *slug, cfg)
+	if err != nil {
+		return refuse(err)
+	}
+	hash := project.Hash(abs, paths)
+	intact := func() error {
+		current, err := project.Baseline(abs, *slug, cfg)
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(paths, current) || project.Hash(abs, current) != hash {
+			return fmt.Errorf("approved baseline changed")
+		}
+		return nil
+	}
 	tree, err := repo.Tree(commit, nil)
 	if err != nil {
 		return refuse(err)
@@ -122,12 +151,88 @@ func run(args []string, stdout, stderr io.Writer) int {
 	s.Stdout = stderr
 	stopSignals := s.WatchSignals()
 	defer stopSignals()
-	e := &env{s: s, client: provider.NewClient("kogen-review"), dir: dir}
+	e := &env{s: s, client: provider.NewClient("kogen-review"), dir: dir, intact: intact}
+	log := &verificationLog{}
+	var pass verify.Pass
+	var verifyErr error
+	empty := len(cfg.Checks) == 0 && len(expected) == 0 && (intent.Model == nil || intent.Model.None) && cfg.Acceptance == nil
+	if empty && len(cfg.Setup) == 0 {
+		pass = verify.Pass{N: 1, Tree: tree, Model: verify.ModelNone}
+	} else {
+		pass, verifyErr = verify.Verify(s.Context(), s, verify.Input{Root: abs, Repo: repo, Config: cfg, Intent: intent, Start: commit, N: 1, RunDir: dir, Tools: verify.Tools{Node: os.Getenv("KOGEN_NODE"), Quint: os.Getenv("KOGEN_QUINT"), Cucumber: os.Getenv("KOGEN_CUCUMBER")}, Log: log})
+	}
+	if verifyErr != nil {
+		pass = log.partial(tree, cfg, intent)
+	}
+	if verifyErr == nil {
+		verifyErr = intact()
+	}
+	current, treeErr := repo.Tree(commit, nil)
+	if verifyErr == nil && treeErr != nil {
+		verifyErr = treeErr
+	}
+	if pass.Tree == "" {
+		pass.Tree = tree
+	}
+	if verifyErr == nil && (pass.Tree != tree || current != tree) {
+		verifyErr = fmt.Errorf("candidate tree changed during verification")
+	}
+	state := "failed"
+	if verifyErr != nil {
+		state = "unavailable"
+	} else if empty && len(cfg.Setup) == len(pass.Setup) && (len(pass.Failing) == 0 || (len(pass.Failing) == 1 && pass.Failing[0] == "acceptance")) {
+		state = "no_checks"
+	} else if pass.Complete(cfg, expected, intent.Model) {
+		if len(cfg.Checks) == 0 && len(expected) == 0 && (intent.Model == nil || intent.Model.None) {
+			state = "no_checks"
+		} else {
+			state = "passed"
+		}
+	} else {
+		for _, c := range append(slices.Clone(pass.Setup), pass.Checks...) {
+			if c.Status == 127 {
+				state = "unavailable"
+			}
+		}
+		if pass.Acceptance != nil && pass.Acceptance.Status == 127 {
+			state = "unavailable"
+		}
+		for _, event := range log.events {
+			if event["event"] == "command_result" && event["status"] == 127 {
+				state = "unavailable"
+			}
+		}
+	}
+	if state != "passed" {
+		pass.Green = false
+	}
+	record := map[string]any{"state": state, "pass": pass, "events": log.events}
+	if verifyErr != nil {
+		record["error"] = verifyErr.Error()
+	}
+	if err := e.Write("initial-verification.json", record); err != nil {
+		verifyErr = err
+		state = "unavailable"
+	}
+	if state != "passed" {
+		detail := pass.Feedback(commands.Acceptance, "")
+		if verifyErr != nil {
+			detail += "\n" + verifyErr.Error()
+		}
+		detail = "initial verification " + state + ": " + detail
+		out, code := report(review.Result{}, sys.Fail("verification", state, detail, 1))
+		out.Run = dir
+		out.Tree = pass.Tree
+		line, _ := json.Marshal(out)
+		fmt.Fprintf(stdout, "%s\n", line)
+		return code
+	}
+	tree = pass.Tree
 	in := review.Input{
 		Candidate: review.Candidate{Root: abs, Repo: repo, Start: commit, Tree: tree},
 		Intent: review.Intent{Slug: *slug, Text: string(text), Approval: text,
 			Role: project.Role{Provider: *prov, Model: *model, Effort: *effort, BaseURL: *baseURL}},
-		Evidence: review.Evidence{Pass: verify.Pass{N: 1, Clean: true, Green: true, Tree: tree}, Commands: commands},
+		Evidence: review.Evidence{Pass: pass, Commands: commands},
 		Tools: review.Tools{
 			Native: func(enabled []string) *tools.Tools { return &tools.Tools{Root: abs, Session: s, Enabled: enabled} },
 			Record: func(tools.Call, tools.Output) map[string]any { return nil },
@@ -179,6 +284,7 @@ type env struct {
 	s      *sys.Session
 	client *provider.Client
 	dir    string
+	intact func() error
 }
 
 // Prepare opens the conversation with the material the review made: its authority, the
@@ -210,7 +316,7 @@ func (e *env) Verify(context.Context) (verify.Pass, error) {
 }
 
 func (e *env) Feedback(verify.Pass, string) string { return "" }
-func (e *env) BaselineIntact() error               { return nil }
+func (e *env) BaselineIntact() error               { return e.intact() }
 func (e *env) Comparison() []string                { return nil }
 func (e *env) Save(review.Checkpoint) error        { return nil }
 func (e *env) Boundary([]any, *review.Done) error  { return nil }
@@ -232,3 +338,55 @@ func (e *env) Write(name string, data any) error {
 }
 
 var _ review.Env = (*env)(nil)
+
+// verificationLog retains producer events even when verification cannot return a pass.
+type verificationLog struct{ events []map[string]any }
+
+func (l *verificationLog) Log(e map[string]any) { l.events = append(l.events, e) }
+
+// partial preserves completed commands when the producer returns an infrastructure error.
+func (l *verificationLog) partial(tree string, cfg *project.Config, intent *project.Intent) verify.Pass {
+	p := verify.Pass{N: 1, Tree: tree, Model: verify.ModelNotRun, Setup: []verify.CommandResult{}, Checks: []verify.CommandResult{}, NotRun: []string{}}
+	if intent.Model == nil || intent.Model.None {
+		p.Model = verify.ModelNone
+	}
+	completed := map[string]verify.CommandResult{}
+	commands := map[string]string{}
+	for _, e := range l.events {
+		name, _ := e["name"].(string)
+		if e["event"] == "command" {
+			commands[name], _ = e["command"].(string)
+		}
+		if e["event"] == "command_result" {
+			status, ok := e["status"].(int)
+			if ok {
+				output, _ := e["output"].(string)
+				completed[name] = verify.CommandResult{Name: name, Command: commands[name], Status: status, Output: output}
+			}
+		}
+	}
+	for i := range cfg.Setup {
+		name := fmt.Sprintf("setup-%d", i+1)
+		if c, ok := completed[name]; ok {
+			p.Setup = append(p.Setup, c)
+		} else {
+			p.NotRun = append(p.NotRun, name)
+		}
+	}
+	if _, ok := completed["acceptance"]; !ok {
+		p.NotRun = append(p.NotRun, "acceptance")
+	}
+	if intent.Model != nil && !intent.Model.None {
+		if _, ok := completed["model"]; !ok {
+			p.NotRun = append(p.NotRun, "model")
+		}
+	}
+	for _, check := range cfg.Checks {
+		if c, ok := completed[check.Name]; ok {
+			p.Checks = append(p.Checks, c)
+		} else {
+			p.NotRun = append(p.NotRun, check.Name)
+		}
+	}
+	return p
+}
