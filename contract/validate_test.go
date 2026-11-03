@@ -56,8 +56,8 @@ func TestValidateAcceptsTheVerdictShapes(t *testing.T) {
 	} {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
-			b, _ := newAttempt(t)
-			verdict, problems, err := review.Validate(b, decodeArgs(t, tc.args), nil)
+			in, h := newReview(t)
+			verdict, problems, err := review.Validate(in, h, decodeArgs(t, tc.args), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -75,9 +75,9 @@ func TestValidateAcceptsTheVerdictShapes(t *testing.T) {
 // k_revod_gate_test.go).
 func TestValidateRefusesAVerdictWithUnreadParts(t *testing.T) {
 	t.Parallel()
-	b, h := newAttempt(t)
+	in, h := newReview(t)
 	h.unread = []string{"part-1", "part-2"}
-	verdict, problems, err := review.Validate(b, decodeArgs(t, `{"verdict":"approve","findings":[]}`), nil)
+	verdict, problems, err := review.Validate(in, h, decodeArgs(t, `{"verdict":"approve","findings":[]}`), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,10 +85,10 @@ func TestValidateRefusesAVerdictWithUnreadParts(t *testing.T) {
 		t.Error("validate-unread: an approval with unread parts was accepted")
 	}
 	deepEq(t, "validate-unread approve", problems, []string{"Read all pinned source evidence before approving: 2 unread part(s); use read_file on part-1, part-2"})
-	_, problems, _ = review.Validate(b, decodeArgs(t, `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"m"}]}`), nil)
+	_, problems, _ = review.Validate(in, h, decodeArgs(t, `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"m"}]}`), nil)
 	deepEq(t, "validate-unread changes", problems, []string{"2 pinned part(s) unread; read them before a verdict; incomplete delivery is not a candidate defect; use read_file on part-1, part-2"})
 	h.unread = nil
-	verdict, problems, _ = review.Validate(b, decodeArgs(t, `{"verdict":"approve","findings":[]}`), nil)
+	verdict, problems, _ = review.Validate(in, h, decodeArgs(t, `{"verdict":"approve","findings":[]}`), nil)
 	if verdict == nil || problems != nil {
 		t.Errorf("validate-unread: an approval with every part read was refused: %v", problems)
 	}

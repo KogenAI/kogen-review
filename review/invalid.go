@@ -6,39 +6,42 @@ import (
 	"kogen-loop/sys"
 )
 
-// A review that ends without a valid verdict is handed to the Build (core.Host.Invalid) with
-// the candidate/review_invalid stop: the Build decides what follows (its retry and review-only
-// handling), the reviewer only records the facts.
+// A review that ends without a valid verdict returns its Invalid with the
+// candidate/review_invalid stop: the caller decides what follows (a Build's retry and
+// review-only handling), the reviewer only records the facts.
 
 // allowance records a consumption of the review's allowances in the run log.
 func (r *run) allowance(why string) {
-	r.b.Run.Event(map[string]any{
-		"event": "review_allowance", "review": r.b.Review, "why": why,
+	r.env.Event(map[string]any{
+		"event": "review_allowance", "review": r.in.Number, "why": why,
 		"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
 	})
 }
 
 // invalidStop ends the review without a verdict (the second spending of an allowance). It
-// records the reason with both counters, notes the review for the retry gate and returns
+// records the reason with both counters, keeps the review's Invalid for its Result and returns
 // candidate/review_invalid. forced: the route was told to call submit_review and did not, which
 // the hand-off names.
 func (r *run) invalidStop(problems []string, reason string, forced bool) error {
-	b := r.b
-	b.Run.Event(map[string]any{
-		"event": "review", "review": b.Review, "verdict": "invalid", "problems": problems, "reason": reason,
+	r.env.Event(map[string]any{
+		"event": "review", "review": r.in.Number, "verdict": "invalid", "problems": problems, "reason": reason,
 		"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
 	})
-	b.LastReview = &core.ReviewRecord{N: b.Review, Verdict: "invalid", Findings: []map[string]any{}}
-	end := &core.InvalidEnd{
-		Review: b.Review, Reason: reason, Problems: problems, RejectedVerdict: r.sess.Rejected, NoToolReminder: r.sess.NoTool,
+	end := &Invalid{
+		Review: r.in.Number, Reason: reason, Problems: problems, RejectedVerdict: r.sess.Rejected, NoToolReminder: r.sess.NoTool,
 		Pass: r.pass, Base: r.base, Reopened: r.sess.Reopened, Repaired: r.sess.Repaired,
 	}
 	if forced {
 		end.ForcedRoute = provider.Name(core.ProviderRole(r.sess.Role))
 		end.ForcedModel = r.sess.Role.Model
 	}
-	b.Invalid(end)
+	r.invalid = end
 	return InvalidError()
+}
+
+// InvalidRecord is the review record of a review that ended without a valid verdict.
+func InvalidRecord(n int) core.ReviewRecord {
+	return core.ReviewRecord{N: n, Verdict: "invalid", Findings: []map[string]any{}}
 }
 
 // InvalidError is the stop of a review that ended without a valid verdict.

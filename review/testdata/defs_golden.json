@@ -1,0 +1,54 @@
+{
+  "submit_review": {
+    "description": "Submit the review: verdict approve or changes, with findings.",
+    "name": "submit_review",
+    "parameters": {
+      "properties": {
+        "findings": {
+          "items": {
+            "properties": {
+              "line": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "severity": {
+                "enum": [
+                  "blocking",
+                  "note"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line",
+              "severity",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "verdict": {
+          "enum": [
+            "approve",
+            "changes"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "verdict",
+        "findings"
+      ],
+      "type": "object"
+    },
+    "strict": false,
+    "type": "function"
+  }
+}

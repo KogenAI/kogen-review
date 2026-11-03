@@ -13,6 +13,7 @@ import (
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
+	"github.com/KogenAI/kogen-review/review"
 	"github.com/KogenAI/kogen-verification/verify"
 	"kogen-loop/provider"
 	"kogen-loop/sys"
@@ -63,47 +64,59 @@ var reviewRole = project.Role{Provider: "chatgpt", Model: "fixture-review-model"
 // greenPass is the green pass of greenTree a review is given.
 func greenPass() verify.Pass { return verify.Pass{N: 1, Clean: true, Green: true, Tree: greenTree} }
 
-// fakeHost is the Build's side of core.Attempt, as kogen-build's host implements it, reduced
-// to what a test scripts: a candidate tree, the checkout's files, the model's answers and the
-// executor's rounds. It records what the reviewer asks of the Build. Methods a case does not
-// expect fail the test through the nil embedded interface (a panic).
-type fakeHost struct {
-	core.Host
-	t     *testing.T
-	state *core.State
+// fakeEnv is a review's Env as a test scripts it: a candidate tree, the model's answers, the
+// verification passes and the material. It records what the reviewer asks of its caller. No
+// Build is involved: the input is a saved candidate in a temporary checkout and a run folder.
+type fakeEnv struct {
+	t   *testing.T
+	dir string
 
 	mu        sync.Mutex
 	tree      string
 	answers   []*provider.Response // one per Request, in order
-	requests  []core.RequestSpec
-	saves     []core.Continuation
+	requests  []review.Request
+	stages    []string            // the stage of every Save and "tool" for every Boundary, in order
+	saves     []review.Checkpoint // every Save
+	events    []map[string]any
 	progress  []string
 	tracks    int
 	verifies  []verify.Pass // what Verify returns, in order
-	invalid   *core.InvalidEnd
-	unread    []string // MaterialUnread's answer
+	last      *core.ReviewRecord
+	repairs   int
+	executor  *core.ExecutorState
+	unread    []string // Unread's answer
 	material  core.MaterialSet
-	materials int // MaterialEvent calls
+	materials int // Delivered calls
 }
 
-// newAttempt is a Build in progress over a temporary checkout with a run folder: the state a
-// reviewer works on and the fake host serving it.
-func newAttempt(t *testing.T) (*core.Attempt, *fakeHost) {
+// newReview is a review of a saved candidate in a temporary checkout with a run folder: its
+// Input (review number 1 of greenPass) and the fake Env serving it.
+func newReview(t *testing.T) (review.Input, *fakeEnv) {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "app.txt"), "candidate\n")
-	run, err := core.StartRun(root)
-	if err != nil {
+	dir := filepath.Join(root, ".kogen/local/runs/fixture-run")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	st := &core.State{
-		Root: root, Slug: "fixture", Start: otherTree, Run: run, Usage: core.ZeroTokens(),
-		Config:         &project.Config{Models: map[string]project.Role{"review": reviewRole}},
-		WorkingContext: map[string]*core.OwnerContext{},
-	}
-	h := &fakeHost{t: t, state: st, tree: greenTree,
+	env := &fakeEnv{t: t, dir: dir, tree: greenTree,
 		material: core.MaterialSet{Authority: "fixture authority", Source: "fixture source", Files: []map[string]any{{"path": "app.txt"}}}}
-	return &core.Attempt{State: st, Host: h}, h
+	in := review.Input{
+		Candidate: review.Candidate{Root: root, Start: otherTree, Tree: greenTree},
+		Intent:    review.Intent{Role: reviewRole},
+		Evidence:  review.Evidence{Pass: greenPass()},
+		Tools: review.Tools{
+			Native: func(enabled []string) *tools.Tools { return &tools.Tools{Root: root, Enabled: enabled} },
+			Record: func(tools.Call, tools.Output) map[string]any { return nil },
+			Round: func(ctx context.Context, sess executor.Session, in executor.Input) (executor.RoundResult, error) {
+				return sess.Round(ctx, in)
+			},
+			Home: os.Getenv("HOME"),
+		},
+		Number: 1,
+		Run:    review.Run{ID: "fixture-run", Dir: dir},
+	}
+	return in, env
 }
 
 func writeFile(t *testing.T, path, text string) {
@@ -116,45 +129,57 @@ func writeFile(t *testing.T, path, text string) {
 	}
 }
 
-func (h *fakeHost) Save(c core.Continuation) error {
+func (h *fakeEnv) Save(c review.Checkpoint) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.saves = append(h.saves, c)
-	h.state.Continuation = c
+	h.stages = append(h.stages, c.Stage)
 	return nil
 }
 
-func (h *fakeHost) Track() error                      { h.tracks++; return nil }
-func (h *fakeHost) PublishFacts(string) error         { return nil }
-func (h *fakeHost) Progress(line string)              { h.progress = append(h.progress, line) }
-func (h *fakeHost) Err() error                        { return nil }
-func (h *fakeHost) Getenv(name string) string         { return os.Getenv(name) }
-func (h *fakeHost) BaselineIntact() error             { return nil }
-func (h *fakeHost) BaselineFailing() bool             { return false }
-func (h *fakeHost) ComparisonLines() []string         { return nil }
-func (h *fakeHost) DiagnosticMessages() []any         { return nil }
-func (h *fakeHost) BaselineMessage(verify.Pass) []any { return nil }
-func (h *fakeHost) ValidateWorkingContext() error     { return nil }
-func (h *fakeHost) OnDemand() bool                    { return false }
-func (h *fakeHost) Tree() (string, error)             { return h.tree, nil }
-func (h *fakeHost) InStart(path string) bool          { return path == "deleted.txt" }
-func (h *fakeHost) Invalid(end *core.InvalidEnd)      { h.invalid = end }
+func (h *fakeEnv) Boundary([]any, *review.Done) error {
+	h.stages = append(h.stages, "tool")
+	return nil
+}
 
-func (h *fakeHost) Changed(from, to string) ([]string, error) { return []string{"app.txt"}, nil }
+func (h *fakeEnv) Reviewed(r core.ReviewRecord) error { h.last = &r; h.tracks++; return nil }
+func (h *fakeEnv) Repaired() error                    { h.repairs++; h.tracks++; return nil }
+func (h *fakeEnv) Executor(x *core.ExecutorState)     { h.executor = x }
+func (h *fakeEnv) Track() error                       { h.tracks++; return nil }
+func (h *fakeEnv) Facts(string) error                 { return nil }
+func (h *fakeEnv) Progress(line string)               { h.progress = append(h.progress, line) }
+func (h *fakeEnv) Event(e map[string]any)             { h.events = append(h.events, e) }
+func (h *fakeEnv) Err() error                         { return nil }
+func (h *fakeEnv) BaselineIntact() error              { return nil }
+func (h *fakeEnv) Comparison() []string               { return nil }
+func (h *fakeEnv) Custody() error                     { return nil }
+func (h *fakeEnv) Tree() (string, error)              { return h.tree, nil }
+func (h *fakeEnv) InStart(path string) bool           { return path == "deleted.txt" }
 
-func (h *fakeHost) Diff(from, to string, paths []string) (string, error) {
+// Write writes a file of the run folder as JSON.
+func (h *fakeEnv) Write(name string, data any) error {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(h.dir, name), b, 0o600)
+}
+
+func (h *fakeEnv) Changed(from, to string) ([]string, error) { return []string{"app.txt"}, nil }
+
+func (h *fakeEnv) Diff(from, to string, paths []string) (string, error) {
 	return "fixture diff of " + strings.Join(paths, ", "), nil
 }
 
-func (h *fakeHost) TreeDrift(observed, green string) string {
+func (h *fakeEnv) Drift(observed, green string) string {
 	return "the tree is " + observed + ", not " + green
 }
 
-func (h *fakeHost) PassFeedback(pass verify.Pass, completion string) string {
+func (h *fakeEnv) Feedback(pass verify.Pass, completion string) string {
 	return "fixture feedback of pass " + itoa(pass.N) + "; call " + completion
 }
 
-func (h *fakeHost) Verify(context.Context) (verify.Pass, error) {
+func (h *fakeEnv) Verify(context.Context) (verify.Pass, error) {
 	if len(h.verifies) == 0 {
 		h.t.Fatal("Verify was not expected")
 	}
@@ -163,38 +188,32 @@ func (h *fakeHost) Verify(context.Context) (verify.Pass, error) {
 	return p, nil
 }
 
-func (h *fakeHost) NativeTools(enabled []string) *tools.Tools {
-	return &tools.Tools{Root: h.state.Root, Enabled: enabled}
+func (h *fakeEnv) Material(verify.Pass) (core.MaterialSet, error) { return h.material, nil }
+
+func (h *fakeEnv) Blocks(string, core.MaterialSet) ([]core.MaterialSegment, error) {
+	h.t.Fatal("Blocks was not expected")
+	return nil, nil
 }
 
-func (h *fakeHost) ToolRecord(tools.Call, tools.Output) map[string]any { return nil }
-
-func (h *fakeHost) Material(verify.Pass) (core.MaterialSet, error) { return h.material, nil }
-
-func (h *fakeHost) MaterialPrepare(tree string, m core.MaterialSet, role project.Role, instructions string, defs, diagnostic []any, force bool) ([]any, error) {
+func (h *fakeEnv) Prepare(tree string, m core.MaterialSet, role project.Role, instructions string, defs, diagnostic []any) ([]any, error) {
 	return []any{map[string]any{"role": "user", "content": m.Authority + "\n" + m.Source}}, nil
 }
 
-func (h *fakeHost) MaterialUnread([]any) ([]string, error)         { return h.unread, nil }
-func (h *fakeHost) MaterialRequiredUnread([]any) ([]string, error) { return h.unread, nil }
-func (h *fakeHost) MaterialEvent([]any) error                      { h.materials++; return nil }
+func (h *fakeEnv) Unread([]any) ([]string, error) { return h.unread, nil }
+func (h *fakeEnv) Delivered([]any) error          { h.materials++; return nil }
 
-func (h *fakeHost) PrefillSource(role project.Role, instructions string, defs, input []any) ([]any, error) {
+func (h *fakeEnv) Prefill(role project.Role, instructions string, defs, input []any) ([]any, error) {
 	return input, nil
 }
 
-func (h *fakeHost) Request(ctx context.Context, sp core.RequestSpec) (*provider.Response, []any, error) {
-	h.requests = append(h.requests, sp)
+func (h *fakeEnv) Request(ctx context.Context, r review.Request) (*provider.Response, []any, error) {
+	h.requests = append(h.requests, r)
 	if len(h.answers) == 0 {
 		h.t.Fatal("no scripted answer left for a model request")
 	}
 	resp := h.answers[0]
 	h.answers = h.answers[1:]
-	return resp, sp.Input, nil
-}
-
-func (h *fakeHost) GuardedRound(ctx context.Context, sess executor.Session, in executor.Input) (executor.RoundResult, error) {
-	return sess.Round(ctx, in)
+	return resp, r.Input, nil
 }
 
 // submitReview is a model answer calling submit_review with args.
@@ -261,29 +280,11 @@ func structured(text string) executor.RoundResult {
 	return executor.RoundResult{Ending: executor.EndFinish, Structured: json.RawMessage(text)}
 }
 
-// events are the run log's events, decoded.
-func events(t *testing.T, b *core.Attempt) []map[string]any {
-	t.Helper()
-	data, err := os.ReadFile(b.Run.LogPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		var e map[string]any
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, e)
-	}
-	return out
-}
-
 // eventsNamed are the run log's events of one kind.
-func eventsNamed(t *testing.T, b *core.Attempt, name string) []map[string]any {
+func eventsNamed(t *testing.T, h *fakeEnv, name string) []map[string]any {
 	t.Helper()
 	var out []map[string]any
-	for _, e := range events(t, b) {
+	for _, e := range h.events {
 		if e["event"] == name {
 			out = append(out, e)
 		}

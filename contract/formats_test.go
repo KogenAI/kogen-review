@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/KogenAI/kogen-coordinator/project"
@@ -138,4 +139,18 @@ func TestMaterialEvidenceJSON(t *testing.T) {
 	json.Unmarshal([]byte(text), &a)
 	json.Unmarshal(back, &b)
 	deepEq(t, "material-json round trip", b, a)
+}
+
+// TestReviewerPolicy pins the reviewer's model-facing names that kogen-executor's contract
+// pinned while executor held them: the submission tool's name and definition, and the
+// instructions carrying the limit-raise rule once (item reviewer-policy; kogen-build
+// build/review_lineup_test.go, review_test.go, cache_id_test.go and kogen cli's review tests).
+func TestReviewerPolicy(t *testing.T) {
+	t.Parallel()
+	eq(t, "reviewer-policy tool", review.SubmitReviewTool, "submit_review")
+	defs := review.ReviewerToolDefinitions(review.SubmitReviewTool)
+	eq(t, "reviewer-policy definitions", len(defs), 1)
+	eq(t, "reviewer-policy definition name", defs[0]["name"], any("submit_review"))
+	eq(t, "reviewer-policy limit rule", strings.Count(review.ReviewerInstructions(), "\n"+review.LimitRaises+"\n"), 1)
+	eq(t, "reviewer-policy generic tools", len(review.ReviewerToolDefinitions(review.ToolNames...)), len(review.ToolNames))
 }

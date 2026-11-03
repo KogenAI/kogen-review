@@ -3,8 +3,6 @@ package review
 import (
 	"strconv"
 	"strings"
-
-	"github.com/KogenAI/kogen-executor/agent"
 )
 
 // The reviewer's instructions in the on_demand mode: the complete-source rule of the parts mode
@@ -22,7 +20,7 @@ const (
 // Prompt is the native reviewer's instructions: the reviewer prompt, with the on_demand
 // reading rule in that mode.
 func Prompt(onDemand bool) string {
-	text := agent.Prompt(agent.Reviewer)
+	text := ReviewerInstructions()
 	if !onDemand {
 		return text
 	}
