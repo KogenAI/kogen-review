@@ -168,7 +168,7 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	if strings.Contains(text, reviewerOldSentence) || strings.Count(text, reviewerBatchParagraph) != 1 {
 		t.Fatal("reviewer must replace exactly the old batching sentence")
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "f9b82f3df578171f64ee4891fe46bc4171b8b3ebbc26b298d284378d1ed2e646" {
+	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "be749a3351e36364c3b4254e1df7b8545523684741a5702a4109263308392d95" {
 		t.Fatalf("reviewer hash = %s", got)
 	}
 	data, err := os.ReadFile("testdata/defs_golden.json")
@@ -193,7 +193,7 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 func TestExternalReviewTaskCarriesTheRequirementsRule(t *testing.T) {
 	const final = "Finish with the structured verdict: verdict approve or changes, findings {path, line, severity blocking|note, message} and requirements {requirement, evidence test|acceptance|probe|none, ref, met}. A changes verdict needs a blocking finding; an approve verdict has none."
 	for name, task := range map[string]string{"reviewTask": reviewTask, "reviewPartsTask": reviewPartsTask} {
-		if strings.Count(task, RequirementsRule) != 1 || !strings.Contains(task, LimitRaises+"\n"+RequirementsRule+"\n"+final) {
+		if strings.Count(task, RequirementsRule) != 1 || !strings.Contains(task, LimitRaises+"\n"+RequirementsRule+"\n"+unsupportedClaimsRule+"\n"+final) {
 			t.Errorf("%s does not carry the requirements rule after the limit rule and the new final sentence", name)
 		}
 	}
