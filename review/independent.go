@@ -91,7 +91,8 @@ type Session struct {
 	Seen string `json:"seen_tree,omitempty"`
 	// Tools are the tool definitions the reviewer conversation was given; a continued
 	// conversation keeps them (empty: the current reviewer tools).
-	Tools []any `json:"tools,omitempty"`
+	Tools    []any `json:"tools,omitempty"`
+	Requests int   `json:"requests,omitempty"`
 	// Rejected and NoTool are the allowances this conversation has consumed: one rejected
 	// submit_review (after the unread-progress exemption) and one prose-only turn (the
 	// reminder) are each sent back once, independently of each other. Remind marks the
@@ -340,7 +341,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	feedback = delivery + feedback
 	r.pass = pass
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
@@ -500,7 +501,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	}
 	r.pass = final
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	if err := r.save(route.StageReview); err != nil {
@@ -553,6 +554,17 @@ func failureIdentities(p verify.Pass) []string {
 // problems, and a prose-only turn is sent back with a reminder (the next request requires
 // submit_review where the route supports it). Spending an allowance a second time ends this
 // review without a verdict (run.invalidStop).
+const reviewBudgetNotice = "Your review working budget is spent. Call submit_review now with what you know; verdict validation and unread-part requirements still apply."
+
+func budgetNotice(input []any) []any {
+	for _, item := range input {
+		if m, ok := item.(map[string]any); ok && m["role"] == "user" && m["content"] == reviewBudgetNotice {
+			return input
+		}
+	}
+	return append(input, map[string]any{"role": "user", "content": reviewBudgetNotice})
+}
+
 func (r *run) converse(ctx context.Context) (Verdict, error) {
 	env := r.env
 	prevUnread := -1
@@ -560,11 +572,16 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		prevUnread = r.sess.PrevUnread
 	}
 	for {
+		overBudget := r.sess.Requests >= 12
+		if overBudget {
+			r.sess.Input = budgetNotice(r.sess.Input)
+		}
+		r.sess.Requests++
 		if err := r.save(route.StageReview); err != nil {
 			return Verdict{}, err
 		}
 		force := ""
-		if r.sess.Remind {
+		if r.sess.Remind || overBudget {
 			mode := "text_fallback"
 			if provider.SupportsToolChoice(core.ProviderRole(r.sess.Role)) {
 				mode = "api_forced"
@@ -575,8 +592,9 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
 			})
 		}
+		requestSession := r.sess
 		retain := func(input []any) (json.RawMessage, error) {
-			sent := r.sess
+			sent := requestSession
 			sent.Input = input
 			return sent.Encode()
 		}
@@ -584,7 +602,14 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			Role: r.sess.Role, Instructions: ReviewerInstructions(),
 			Input: r.sess.Input, Tools: r.tools, Retain: retain, ForceTool: force,
 			Prefill: func(input []any) ([]any, error) {
-				return env.Prefill(r.sess.Role, ReviewerInstructions(), r.tools, input)
+				prepared, err := env.Prefill(r.sess.Role, ReviewerInstructions(), r.tools, input)
+				if err != nil {
+					return nil, err
+				}
+				if overBudget {
+					prepared = budgetNotice(prepared)
+				}
+				return prepared, nil
 			},
 		})
 		if err != nil {

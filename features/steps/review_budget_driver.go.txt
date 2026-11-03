@@ -1,0 +1,102 @@
+package contract
+
+import (
+ "context"
+ "encoding/json"
+ "errors"
+ "os"
+ "strings"
+ "testing"
+
+ "github.com/KogenAI/kogen-coordinator/route"
+ "github.com/KogenAI/kogen-review/review"
+ "kogen-loop/provider"
+)
+
+type budgetEnv struct {
+ *fakeEnv
+ mode string
+ rows []map[string]any
+ raw json.RawMessage
+ total int
+ stopped bool
+}
+
+const budgetNotice = "Your review working budget is spent. Call submit_review now with what you know; verdict validation and unread-part requirements still apply."
+
+func (h *budgetEnv) Request(ctx context.Context, r review.Request) (*provider.Response, []any, error) {
+ h.total++
+ raw, err := r.Retain(r.Input)
+ if err != nil { return nil, nil, err }
+ h.raw = raw
+ var state map[string]any
+ if err := json.Unmarshal(raw, &state); err != nil { return nil, nil, err }
+ count := state["requests"]
+ if count == nil { count = float64(0) }
+ rejected := state["rejected_verdicts"]
+ if rejected == nil { rejected = float64(0) }
+ noTool := state["no_tool_reminders"]
+ if noTool == nil { noTool = float64(0) }
+ notice := false
+ userCount := 0
+ for _, item := range r.Input {
+  m, _ := item.(map[string]any)
+  if m["role"] == "user" { userCount++ }
+  if m["content"] == budgetNotice { notice = true }
+ }
+ h.rows = append(h.rows, map[string]any{"n":h.total,"force":r.ForceTool,"budget":notice,"count":count,"rejected":rejected,"no_tool":noTool,"unread":len(h.unread),"users":userCount,"policy":r.Instructions == review.ReviewerInstructions()})
+ if h.mode == "resume" && h.total == 7 && !h.stopped {
+  // The caller's working window may replace all conversation bytes; the retained
+  // session, not those bytes, must carry the cumulative count.
+  h.raw, err = r.Retain([]any{map[string]any{"role":"user","content":"reset window"}})
+  h.stopped = true
+  return nil, nil, errors.New("scripted interruption")
+ }
+ approve := func() *provider.Response { return submitReview(`{"verdict":"approve","findings":[]}`) }
+ if h.mode == "third" && h.total == 3 { return approve(), r.Input, nil }
+ if h.mode == "allowances" {
+  if h.total == 2 { return submitReview(`{"verdict":"changes","findings":[]}`), r.Input, nil }
+  if h.total == 4 { return prose("still considering"), r.Input, nil }
+ }
+ if h.total >= 13 {
+  if h.mode == "fallback" { return prose("still considering"), r.Input, nil }
+  if h.mode == "unread" {
+   if h.total == 13 { return approve(), r.Input, nil }
+   if h.total == 14 {
+    h.unread = nil
+    return budgetRead(), r.Input, nil
+   }
+  }
+  return approve(), r.Input, nil
+ }
+ return budgetRead(), r.Input, nil
+}
+
+func budgetRead() *provider.Response {
+ return &provider.Response{Items:[]map[string]any{{"type":"function_call","call_id":"budget-read","name":"read_file","arguments":`{"path":"app.txt"}`}}}
+}
+
+func TestBudgetAcceptanceDriver(t *testing.T) {
+ mode := os.Getenv("BUDGET_CASE")
+ if mode == "" { t.Fatal("BUDGET_CASE is required for TestBudgetAcceptanceDriver") }
+ in, base := newReview(t)
+ if mode == "fallback" { in.Intent.Role.Provider = "anthropic"; in.Intent.Role.Model = "claude-sonnet-4-5" }
+ h := &budgetEnv{fakeEnv:base,mode:mode}
+ if mode == "unread" { h.unread = []string{"app.txt"} }
+ result, err := (review.Independent{}).Review(context.Background(),in,h)
+ interrupted := false
+ if mode == "resume" && err != nil && strings.Contains(err.Error(),"scripted interruption") {
+  interrupted = true
+  pass := greenPass()
+  in.Checkpoint = &review.Checkpoint{Stage:route.StageReview,Pass:&pass,Base:&pass,Session:h.raw}
+  result, err = (review.Independent{}).Resume(context.Background(),in,h)
+ }
+ reason := ""
+ if result.Invalid != nil { reason = result.Invalid.Reason }
+ errorText := ""
+ if err != nil { errorText = err.Error() }
+ data := map[string]any{"rows":h.rows,"verdict":result.Record.Verdict,"reason":reason,"error":errorText,"interrupted":interrupted}
+ b, e := json.Marshal(data)
+ if e != nil { t.Fatal(e) }
+ if e := os.WriteFile(os.Getenv("BUDGET_RESULT"),b,0600); e != nil { t.Fatal(e) }
+}

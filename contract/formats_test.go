@@ -44,7 +44,7 @@ const sessionJSON = `{"role":{"Provider":"chatgpt","Model":"fixture-review-model
 	`"attempts":[{"pass":1,"tree":"1111111111111111111111111111111111111111","verdict":"changes","findings":[{"line":3,"message":"m","path":"app.txt","severity":"blocking"}]}],` +
 	`"verdict":{"verdict":"changes","findings":[{"line":3,"message":"m","path":"app.txt","severity":"blocking"}]},` +
 	`"tree":"1111111111111111111111111111111111111111","seen_tree":"2222222222222222222222222222222222222222",` +
-	`"tools":[{"name":"read_file"}],"rejected_verdicts":1,"no_tool_reminders":1,"remind":true,"prev_unread":2,"reopened":true,"repaired":true}`
+	`"tools":[{"name":"read_file"}],"requests":13,"rejected_verdicts":1,"no_tool_reminders":1,"remind":true,"prev_unread":2,"reopened":true,"repaired":true}`
 
 // The trees fullSession names: a session's bytes do not depend on the trees existing.
 const (
@@ -61,7 +61,7 @@ func fullSession() review.Session {
 		Attempts: []review.Submitted{{Pass: 1, Tree: sessionTree, Verdict: "changes", Findings: []map[string]any{finding}}},
 		Verdict:  &review.Verdict{Verdict: "changes", Findings: []map[string]any{finding}},
 		Tree:     sessionTree, Seen: sessionSeen, Tools: []any{map[string]any{"name": "read_file"}},
-		Rejected: 1, NoTool: 1, Remind: true, PrevUnread: 2, Reopened: true, Repaired: true,
+		Requests: 13, Rejected: 1, NoTool: 1, Remind: true, PrevUnread: 2, Reopened: true, Repaired: true,
 	}
 }
 
@@ -101,6 +101,11 @@ func TestDecodeSessionReadsWhatACheckpointKept(t *testing.T) {
 		t.Errorf("session-decode: got %#v, want %#v", s, fullSession())
 	}
 	eq(t, "session-decode verdict", s.Verdict.Verdict, "changes")
+	legacy, err := review.DecodeSession(json.RawMessage(strings.Replace(sessionJSON, `"requests":13,`, "", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "legacy request count", legacy.Requests, 0)
 	if _, ok := s.Verdict.Findings[0]["line"].(json.Number); !ok {
 		t.Errorf("session-decode: a finding's line is %T, want json.Number", s.Verdict.Findings[0]["line"])
 	}

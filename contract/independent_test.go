@@ -230,6 +230,9 @@ func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
 	var carried bool
 	for _, c := range h.saves {
 		if s, err := review.DecodeSession(c.Session); err == nil && s.Repaired && slices.Equal(s.Probes, []string{"echo probed"}) {
+			if s.Requests < 2 {
+				t.Errorf("repair feedback lost request count: %d", s.Requests)
+			}
 			carried = true
 		}
 	}
@@ -239,4 +242,34 @@ func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
 	rec = readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
 	reqs, _ := rec["requirements"].([]any)
 	eq(t, "review-requirements entries", len(reqs), 1)
+}
+
+func TestThirdRequestSequence(t *testing.T) {
+	in, h := newReview(t)
+	h.answers = []*provider.Response{shellCall("echo one"), shellCall("echo two"), submitReview(`{"verdict":"approve","findings":[]}`)}
+	if _, err := (review.Independent{}).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.requests) != 3 {
+		t.Fatalf("requests: %d", len(h.requests))
+	}
+	initial := h.requests[0].Input
+	if len(initial) != 1 {
+		t.Fatalf("initial input: %d items", len(initial))
+	}
+	expected := slices.Clone(initial)
+	for i, r := range h.requests {
+		deepEq(t, "role", r.Role, reviewRole)
+		eq(t, "instructions", r.Instructions, review.ReviewerInstructions())
+		deepEq(t, "tools", r.Tools, h.requests[0].Tools)
+		eq(t, "force", r.ForceTool, "")
+		deepEq(t, "input", r.Input, expected)
+		if i < 2 {
+			word := []string{"one", "two"}[i]
+			expected = slices.Concat(expected, []any{
+				map[string]any{"type": "function_call", "call_id": "call-shell", "name": "shell", "arguments": `{"command":"echo ` + word + `"}`},
+				map[string]any{"type": "function_call_output", "call_id": "call-shell", "output": "exit status: 0\n" + word + "\n"},
+			})
+		}
+	}
 }
