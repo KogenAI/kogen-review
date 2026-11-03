@@ -108,8 +108,9 @@ func (e *savedEnv) Write(name string, data any) error {
 }
 
 // savedEnvelope is a version 4 checkpoint as kogen-build writes it to a run folder: the test
-// declares the envelope itself (it does not import kogen-build) and keeps the state raw, to be
-// decoded into the executor's core.State.
+// declares the envelope itself (it does not import kogen-build) and keeps the state raw. The state
+// is written with kogen-build's persisted keys (savedState) and read back through review's own
+// types and savedRead.
 type savedEnvelope struct {
 	Version   int             `json:"version"`
 	Identity  string          `json:"identity"`
@@ -118,6 +119,64 @@ type savedEnvelope struct {
 	Approval  string          `json:"approval"`
 	State     json.RawMessage `json:"state"`
 	Recovery  json.RawMessage `json:"recovery_raw"`
+}
+
+// savedState is the state of the checkpoint the test writes, with the keys kogen-build's
+// persisted state uses. It is the test's own declaration: no executor or Build state type.
+type savedState struct {
+	Root            string             `json:"root"`
+	Slug            string             `json:"slug"`
+	Config          *project.Config    `json:"config"`
+	IntentText      string             `json:"intent_text"`
+	Start           string             `json:"start"`
+	StartTree       string             `json:"start_tree"`
+	Baseline        []string           `json:"baseline"`
+	BaselineDigests map[string]string  `json:"baseline_digests"`
+	Excluded        []string           `json:"excluded"`
+	Run             savedRun           `json:"run"`
+	GitIndex        string             `json:"git_index"`
+	Phase           string             `json:"phase"`
+	Usage           core.Tokens        `json:"usage"`
+	AttemptUsage    core.Tokens        `json:"attempt_usage"`
+	Round           int                `json:"round"`
+	Pass            int                `json:"pass"`
+	Review          int                `json:"review"`
+	LastPass        *verify.Pass       `json:"last_pass"`
+	LastReview      *core.ReviewRecord `json:"last_review"`
+	Continuation    savedContinuation  `json:"continuation"`
+	ApprovalBytes   string             `json:"approval_bytes"`
+}
+
+type savedRun struct {
+	ID      string `json:"id"`
+	Dir     string `json:"dir"`
+	LogPath string `json:"log"`
+}
+
+type savedContinuation struct {
+	Stage  string          `json:"stage"`
+	Pass   *verify.Pass    `json:"pass"`
+	Base   *verify.Pass    `json:"base"`
+	Review json.RawMessage `json:"review"`
+}
+
+// savedRead declares exactly the fields of the saved state the test reads back from disk.
+type savedRead struct {
+	Root         string          `json:"root"`
+	Slug         string          `json:"slug"`
+	Config       *project.Config `json:"config"`
+	IntentText   string          `json:"intent_text"`
+	Start        string          `json:"start"`
+	Run          review.Run      `json:"run"`
+	Review       int             `json:"review"`
+	LastPass     *verify.Pass    `json:"last_pass"`
+	Continuation struct {
+		Stage  string          `json:"stage"`
+		Pass   *verify.Pass    `json:"pass"`
+		Base   *verify.Pass    `json:"base"`
+		Review json.RawMessage `json:"review"`
+	} `json:"continuation"`
+	ApprovalBytes string `json:"approval_bytes"`
 }
 
 const savedIntent = "# Greet the world\n\nThe greeting says hello, world.\n"
@@ -160,7 +219,7 @@ func writeSavedCandidate(t *testing.T) string {
 		t.Fatal(err)
 	}
 	intent := []byte(savedIntent)
-	state := core.State{
+	state := savedState{
 		Root:       root,
 		Slug:       "fixture",
 		Config:     &project.Config{Models: map[string]project.Role{"review": reviewRole}},
@@ -172,7 +231,7 @@ func writeSavedCandidate(t *testing.T) string {
 			".kogen/project.yaml": "0000000000000000000000000000000000000000000000000000000000000000",
 		},
 		Excluded:     []string{},
-		Run:          &core.Run{ID: "a1b2c3d4", Dir: dir, LogPath: filepath.Join(dir, "log.jsonl")},
+		Run:          savedRun{ID: "a1b2c3d4", Dir: dir, LogPath: filepath.Join(dir, "log.jsonl")},
 		GitIndex:     filepath.Join(root, ".git/kogen-index"),
 		Phase:        "building",
 		Usage:        core.ZeroTokens(),
@@ -182,7 +241,7 @@ func writeSavedCandidate(t *testing.T) string {
 		Review:       1,
 		LastPass:     &green,
 		LastReview:   &core.ReviewRecord{N: 1, Verdict: "approve", Findings: []map[string]any{}, Tree: tree},
-		Continuation: core.Continuation{
+		Continuation: savedContinuation{
 			Stage:  route.StageReviewVerify,
 			Pass:   &green,
 			Base:   &green,
@@ -226,7 +285,7 @@ func savedCandidate(t *testing.T) (review.Input, *savedEnv, review.Checkpoint, s
 	if err := json.Unmarshal(data, &env); err != nil {
 		t.Fatal(err)
 	}
-	var state core.State
+	var state savedRead
 	if err := json.Unmarshal(env.State, &state); err != nil {
 		t.Fatal(err)
 	}

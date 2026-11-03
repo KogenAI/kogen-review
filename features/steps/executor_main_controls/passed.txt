@@ -1,0 +1,6 @@
+=== RUN   TestReviewOfASavedCandidateWithoutABuild
+=== PAUSE TestReviewOfASavedCandidateWithoutABuild
+=== CONT  TestReviewOfASavedCandidateWithoutABuild
+--- PASS: TestReviewOfASavedCandidateWithoutABuild (0.33s)
+PASS
+ok  	github.com/KogenAI/kogen-review/contract	0.649s

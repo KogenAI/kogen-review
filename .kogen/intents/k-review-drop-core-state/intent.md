@@ -1,0 +1,55 @@
+# Read saved-candidate state without core.State
+
+Slug: k-review-drop-core-state
+Model: not applicable — a test-only change: no product state, behaviour or format changes
+Acceptance:
+- .kogen/intents/k-review-drop-core-state/acceptance.feature
+- features/steps/executor_main_steps.js
+- features/steps/executor_main_observer.cjs
+- features/steps/executor_main_controls/passed.txt
+- features/steps/executor_main_controls/no_tests_to_run.txt
+- features/steps/saved_candidate_steps.js
+- features/steps/saved_candidate_observer.cjs
+
+The saved-candidate contract test (`TestReviewOfASavedCandidateWithoutABuild`, `contract/saved_candidate_test.go`, contract item `saved-candidate`) stops using kogen-executor's `core.State`. kogen-executor main (2f13bd4, "Remove the phase prompts and shrink core") moved the Build state out of executor's `core` package into kogen-build (`build.State`). Against that executor, `go vet ./...` here fails with `contract/saved_candidate_test.go:163:16: undefined: core.State`. A full compile also reports `undefined: core.Run` (line 175) and `undefined: core.Continuation` (line 185). This blocks every executor landing through the consumer check. kogen-review cannot import kogen-build, because kogen-build depends on kogen-review.
+
+This is a test-only change. The `review` package (including `review/testdata/prompts_golden.json` and `review/testdata/defs_golden.json`), `go.mod` and `go.sum` stay byte-identical, and the pinned kogen-executor stays `v0.0.0-20261103084720-09eabaf5b7dc`. There is no product behaviour, format, CLI or golden change.
+
+What changes in `contract/saved_candidate_test.go`:
+
+1. The test no longer names `core.State`, `core.Run` or `core.Continuation`. None of them exists in kogen-executor main. It may keep using the `core` symbols that exist in both the pinned executor and executor main and that the `review.Env` contract already uses: `core.ReviewRecord`, `core.ExecutorState`, `core.ZeroTokens` and `core.EncodeJSON`. It still must not import kogen-build or any Build state type.
+2. Writing the saved state. `writeSavedCandidate` still writes `<checkout>/.kogen/local/runs/a1b2c3d4/checkpoint.json` as a version 4 checkpoint in the current persisted format, with the same values it writes now. The run folder has mode 0700 and the file mode 0600. The envelope is the test's own `savedEnvelope`, unchanged, with the keys `version` (4), `identity`, `candidate`, `index`, `approval`, `state` and `recovery_raw` (null). The `state` object uses the JSON keys that kogen-build's `build.State` writes. Those keys are identical to the pinned `core.State` keys: `root`, `slug`, `config` (with `Models["review"]` = `reviewRole`), `intent_text`, `start`, `start_tree`, `baseline` and `baseline_digests` (`.kogen/project.yaml`), `excluded` (`[]`), `run` (`{"id":"a1b2c3d4","dir":<run folder>,"log":<run folder>/log.jsonl}`), `git_index`, `phase` (`building`), `usage` and `attempt_usage` (zero tokens), `round`, `pass` and `review` (1), `last_pass` (the green pass {n 1, clean, green, tree T}) and `last_review` ({n 1, verdict `approve`, findings `[]`, tree T}). `continuation` is `{"stage":"review_verify","pass":<green pass>,"base":<green pass>,"review":<the encoded review.Session>}`, and `approval_bytes` is the base64 of the Intent bytes. The test declares this state shape itself, as a test-local struct or a map.
+3. Reading the saved state. `savedCandidate` reads `checkpoint.json` back from disk with `os.ReadFile`, decodes the envelope, and decodes its `state` through review's own types. That is either the narrow review contract (for example `review.Run` for `run`) or a test-local struct that declares exactly the fields the test reads, under the keys above: `root`, `slug`, `config`, `intent_text`, `start`, `run` (`id`, `dir`), `review`, `last_pass`, `continuation` (`stage`, `pass`, `base`, `review`) and `approval_bytes`.
+4. The test keeps every existing assertion about the saved candidate:
+   - Format and fields read: envelope `version` 4. The envelope `candidate`, `last_pass.tree`, `continuation.pass.tree` and the tree of the session decoded with `review.DecodeSession` all equal T, the candidate commit's tree.
+   - Review input: the review's `Input` and `Env` are built from the loaded state only.
+   - Review result: verdict `approve`, one finding with message `says hello, world`, record tree and pass tree T, 0 repairs and 2 requests. The first request carries `# Greet the world`, the feature, `Project checks: unit: make unit.`, the start-HEAD diff header and `+hello, world`. The second request carries `1\thello, world`. `review-1.json` is in the run folder, and the harness checkpoint is at stage `review_verify`.
+   - Resume: resuming from the loaded `continuation` returns `approve` with tree T and makes no new request (still 2 requests).
+5. Update the comment above `savedEnvelope` and the `saved_candidate_test.go` sentence of `contract/README.md`. Neither may say anymore that the state is a `core.State`. They say that the state is written with kogen-build's persisted keys and read back through review's own types.
+
+The test must pass against both the pinned kogen-executor and kogen-executor main. Acceptance copies the checkout's current files (tracked and untracked, not ignored) to a temporary folder and makes only the copy's `go.mod` require `github.com/KogenAI/kogen-executor@v0.0.0-20261103113250-2f13bd4bf08d`. That is executor main 2f13bd4 named in the request. It then repeats with `@v0.0.0-20261103180309-923b1adfa45c`, the newest executor main (923b1ad) when this Intent was shaped. In each copy it runs `go mod edit`, `go list -m` (which must print exactly that version), `go vet ./...` and `go test -count=1 -v -run ^TestReviewOfASavedCandidateWithoutABuild$ ./contract`. These run with `GOFLAGS=-mod=mod GOWORK=off GONOSUMDB=github.com/KogenAI`. The named test must have run and passed, not just exited 0. Against the pinned executor, the existing saved-candidate acceptance steps still compile and run the whole `./contract` suite with Go's test log. They require PASS, a read of a run folder's `checkpoint.json` followed by its `review-<n>.json`, and no read from the Go module cache or of kogen-build state goldens. A last scenario requires `review/`, `go.mod` and `go.sum` to be as committed at HEAD.
+
+## Decisions
+- No UI/UX surface. The saved state is read through review's own types or a test-local struct for exactly the fields read; kogen-build is not imported (source: request)
+- Executor main is checked at the exact version named in the request (2f13bd4) and at the newest main observed while shaping (923b1ad), each pinned to an exact pseudo-version so the acceptance is deterministic (source: request)
+
+## Source comparison
+- addressed: "The saved-candidate test reads the saved state from disk in the current persisted format through review's own types… It no longer uses core.State": steps 1–3. The proof is the scenarios that run `go vet ./...` and the named test against executor main, where `core.State`, `core.Run` and `core.Continuation` do not exist.
+- addressed: "It must pass against both the pinned executor and executor main": the scenario "Against kogen-executor main…" (2f13bd4), the scenario "Against the newest kogen-executor main…" (923b1ad) and the scenario "Against the pinned kogen-executor…".
+- addressed: "It keeps asserting the same things about the saved candidate (format version, fields read, review result)": step 4. The existing observer steps still require the read of `checkpoint.json` from the run folder and the review record.
+- addressed: "No product behaviour change; go.mod and go.sum unchanged": the scenario "The change is test-only". The executor version is changed only in a temporary copy.
+- addressed: "kogen-review cannot import kogen-build": step 1.
+- addressed: "go vet fails with undefined: core.State… blocks every executor landing through the consumer check": reproduced in a scratch copy with executor 2f13bd4. A scratch prototype of steps 1–4 then passed `go vet ./...` and `go test -count=1 ./...` against the pinned executor, 2f13bd4 and 923b1ad.
+- superseded: the k-review-saved-candidate Intent's statement that `state` is a `core.State` of the pinned executor encoded with `core.EncodeJSON`. The persisted keys and values stay the same; only the Go type that writes and reads them changes.
+
+## Tests
+- The saved-candidate test compiles, vets and passes against kogen-executor main: acceptance scenarios against executor 2f13bd4 and 923b1ad, which reproduce the reported `undefined: core.State` vet failure on the unchanged tree (regression)
+- The saved-candidate test reads the version 4 checkpoint from disk through review's own types and keeps its assertions on format version, fields read, review result and resume: update `TestReviewOfASavedCandidateWithoutABuild` in place in `contract/saved_candidate_test.go` (integration)
+- Against the pinned executor the contract suite still passes and reads the saved checkpoint from the run folder: existing saved-candidate acceptance steps (existing)
+- No product, golden, go.mod or go.sum change: the scenario "The change is test-only" (existing)
+
+## Feasibility
+- evidence: {"id":"executor-main-test-observer","kind":"observer","inputs":["features/steps/executor_main_controls/passed.txt","features/steps/executor_main_controls/no_tests_to_run.txt"],"observers":["features/steps/executor_main_observer.cjs"],"checks":[{"name":"good","command":"\"$KOGEN_NODE\" features/steps/executor_main_observer.cjs TestReviewOfASavedCandidateWithoutABuild 0 features/steps/executor_main_controls/passed.txt","exit":0,"output":""},{"name":"bad","command":"\"$KOGEN_NODE\" features/steps/executor_main_observer.cjs TestReviewOfASavedCandidateWithoutABuild 0 features/steps/executor_main_controls/no_tests_to_run.txt","exit":1,"output":"TestReviewOfASavedCandidateWithoutABuild: it did not run\n"}]}
+- `passed.txt` is the real output of `go test -count=1 -v -run '^TestReviewOfASavedCandidateWithoutABuild$' ./contract` on a scratch prototype against executor 2f13bd4 (exit 0). `no_tests_to_run.txt` is the real output of the same command with a filter that matches no test. That run also exits 0, which shows why the observer requires `=== RUN` and `--- PASS:` lines for the named test, not just the exit status.
+- On the unchanged tree, the drafted acceptance fails both executor-main scenarios at `go vet` with `vet: contract/saved_candidate_test.go:163:16: undefined: core.State`. The pinned and test-only scenarios pass. On the scratch prototype, all 4 scenarios pass (about 10 s). Executor versions 2f13bd4 (`v0.0.0-20261103113250-2f13bd4bf08d`) and 923b1ad (`v0.0.0-20261103180309-923b1adfa45c`) resolved from the public Go module proxy and are in the shared module cache.
+- kogen-build main (`v0.0.0-20261103170811-c8e21725d3fe`, `build/core_state.go`, `build/hooks.go`) persists `State`, `Run`, `Continuation` and the version 4 `Checkpoint` envelope with the same JSON keys as the pinned `core.State`.
