@@ -1,0 +1,102 @@
+package contract
+
+import (
+ "context"
+ "encoding/json"
+ "fmt"
+ "os"
+ "path/filepath"
+ "strings"
+ "testing"
+
+ "github.com/KogenAI/kogen-review/review"
+ "github.com/KogenAI/kogen-verification/verify"
+ "kogen-loop/provider"
+ "kogen-loop/sys"
+)
+
+// This acceptance adapter uses the existing saved-Git-candidate harness, but runs
+// the check against the actual file after each scripted reviewer edit.
+type progressEnv struct {
+ *fakeEnv
+ in review.Input
+ plan []string
+ round int
+ editing bool
+ verified int
+ limit int
+}
+func (h *progressEnv) Request(ctx context.Context, r review.Request) (*provider.Response, []any, error) {
+ h.requests = append(h.requests, r)
+ if h.round >= h.limit { return nil, r.Input, fmt.Errorf("acceptance safety bound reached") }
+ if !h.editing {
+  h.editing = true
+  text := h.plan[len(h.plan)-1]
+  if h.round < len(h.plan) { text = h.plan[h.round] }
+  return shellCall("printf '"+text+"' > app.txt"), r.Input, nil
+ }
+ h.editing = false
+ h.round++
+ return submitReview(`{"verdict":"approve","findings":[]}`), r.Input, nil
+}
+func (h *progressEnv) Verify(ctx context.Context) (verify.Pass, error) {
+ h.verified++
+ b, err := os.ReadFile(filepath.Join(h.in.Candidate.Root,"app.txt")); if err != nil { return verify.Pass{}, err }
+ tree, err := h.in.Candidate.Repo.Tree(h.in.Candidate.Start,nil); if err != nil { return verify.Pass{}, err }
+ p := verify.Pass{N:h.verified+1,Clean:true,Green:strings.HasPrefix(string(b),"good"),Tree:tree}
+ if !p.Green { p.Failing = strings.Split(strings.Split(string(b),"|")[0],",") }
+ return p,nil
+}
+func progressError(err error) string {
+ if err==nil { return "" }
+ if e,ok:=sys.AsError(err); ok { return e.Error()+"\n"+strings.Join(e.Lines,"\n") }
+ return err.Error()
+}
+type progressSnapshot struct {
+ Verdict string `json:"verdict"`
+ Error string `json:"error"`
+ Rounds int `json:"rounds"`
+ Repairs int `json:"repairs"`
+ Verified int `json:"verified"`
+ Candidate string `json:"candidate"`
+ Checkpoint bool `json:"checkpoint"`
+ ResumeRounds int `json:"resumeRounds"`
+ ResumeVerified int `json:"resumeVerified"`
+ ResumeError string `json:"resumeError"`
+ Conversation bool `json:"conversation"`
+}
+func TestRepairProgressAcceptance(t *testing.T) {
+ mode := os.Getenv("REPAIR_CASE"); if mode == "" { t.Skip("acceptance adapter") }
+ plans := map[string][]string{
+  "same":{"check:lint|1","check:lint|2","check:lint|3","good|4"},
+  "progress":{"check:lint,check:test|1","check:test|2","check:test|3","good|4"},
+  "once":{"check:lint|1","good|2"},
+  "green":{"good|1"},
+  "resume":{"check:lint|1","check:lint|2","check:lint|3","check:lint|4","good|5"},
+  "cap":{},
+ }
+ plan,ok := plans[mode]; if !ok { t.Fatal("unknown acceptance case") }
+ if mode == "cap" { for i:=0;i<21;i++ { plan=append(plan,fmt.Sprintf("check:item%d|%d",i,i)) } }
+ in,base := newReview(t)
+ h:= &progressEnv{fakeEnv:base,in:in,plan:plan,limit:22}
+ res,err := (review.Independent{}).Review(context.Background(),in,h)
+ s:=progressSnapshot{Verdict:res.Record.Verdict,Rounds:h.round,Repairs:res.Repairs,Verified:h.verified,Error:progressError(err)}
+ b,e:=os.ReadFile(filepath.Join(in.Candidate.Root,"app.txt")); if e!=nil { t.Fatal(e) }; s.Candidate=string(b)
+ if len(h.saves)>0 {
+  cp:=h.saves[len(h.saves)-1]; s.Checkpoint=len(cp.Session)>0
+  if mode=="resume" && s.Verdict=="changes" {
+   // Round-trip only public checkpoint bytes as an interrupted caller would.
+   raw,e:=json.Marshal(cp); if e!=nil { t.Fatal(e) }; var saved review.Checkpoint
+   if e=json.Unmarshal(raw,&saved); e!=nil { t.Fatal(e) }
+   in.Checkpoint=&saved; in.Last=&res.Record
+   oldRounds,oldVerified:=h.round,h.verified
+   oldSession,e:=review.DecodeSession(cp.Session); if e!=nil { t.Fatal(e) }
+   _,e=(review.Independent{}).Resume(context.Background(),in,h)
+   s.ResumeError=progressError(e)
+   s.ResumeRounds=h.round-oldRounds; s.ResumeVerified=h.verified-oldVerified
+   for _,req:=range h.requests { if len(req.Input)>len(oldSession.Input) { s.Conversation=true } }
+  }
+ }
+ raw,e:=json.Marshal(s); if e!=nil { t.Fatal(e) }
+ if e=os.WriteFile(os.Getenv("REPAIR_RESULT"),raw,0600); e!=nil { t.Fatal(e) }
+}

@@ -70,3 +70,8 @@ Every exported member of `review` that kogen-build uses (derived with a go/types
 | `review.ReviewerInstructions`, `ReviewerToolDefinitions`, `SubmitReviewTool`, `LimitRaises`, `RequirementsRule` | `build/review_lineup_test.go`, `build/review_test.go`, `build/cache_id_test.go` and other review tests | `TestReviewerPolicy`, `TestIndependentReviewApprovesTheGreenPass` |
 
 `review.Prompt`, `review.PartsRule` and `review.OnDemandRule` are exported but no consumer uses them: the on_demand review mode they serve was removed from kogen-build (`dfa857f`, `b47cde7`).
+
+The native session checkpoint optionally retains `repair_rounds`, `failure_identities` (the
+sorted set of stage-qualified final failures), and `failure_streak`. Missing fields default to
+zero for older checkpoints. These values survive retained conversations and blocked-review resume;
+resume's fresh verification does not itself consume a repair round.

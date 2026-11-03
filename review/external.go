@@ -146,10 +146,11 @@ func (x External) Review(ctx context.Context, in Input, env Env) (Result, error)
 // the pass it reviews. part is the 1-based part of a review in parts, 0 for the review in one
 // session; base is the green pass the whole review started from.
 type reviewSend struct {
-	brief      executor.Brief
-	sessionDir string
-	part       int
-	pass, base verify.Pass
+	brief        executor.Brief
+	sessionDir   string
+	part         int
+	pass, base   verify.Pass
+	repairRounds int
 }
 
 // reviewStop is the Build's stop for a review prompt that cannot be sent within the ceiling.
@@ -222,10 +223,9 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 		env.Progress(fmt.Sprintf("kogen: reviewing (review %d, part %d of %d)", in.Number, k, n))
 		approved, err := x.session(ctx, v, role, ev, dir, reviewSend{
 			brief: executor.Brief{Stable: stable, Dynamic: texts[k-1]}, sessionDir: filepath.Join(dir, fmt.Sprintf("part-%d", k)),
-			part: k, pass: current, base: pass,
+			part: k, pass: current, base: pass, repairRounds: repairs,
 		})
-		repairs += approved.Repairs
-		approved.Repairs = repairs
+		repairs = approved.Repairs
 		if err != nil {
 			return approved, err
 		}
@@ -307,7 +307,7 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 	}
 
 	base := s.base
-	r := &run{in: in, env: env, pass: s.pass, external: true, base: &base, sess: Session{Role: role, Usage: core.ZeroTokens(), Seen: s.pass.Tree}}
+	r := &run{in: in, env: env, pass: s.pass, external: true, base: &base, sess: Session{Role: role, Usage: core.ZeroTokens(), Seen: s.pass.Tree, RepairRounds: s.repairRounds}}
 	feedback, invalid := "", 0
 	for round := 1; ; round++ {
 		if round > x.maxRounds {

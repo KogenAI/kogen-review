@@ -160,3 +160,22 @@ func TestReviewerPolicy(t *testing.T) {
 	eq(t, "reviewer-policy limit rule", strings.Count(review.ReviewerInstructions(), "\n"+review.LimitRaises+"\n"), 1)
 	eq(t, "reviewer-policy generic tools", len(review.ReviewerToolDefinitions(review.ToolNames...)), len(review.ToolNames))
 }
+
+// Repair progress survives the same JSON round trip used by retained checkpoints.
+func TestRepairProgressSessionRoundTrip(t *testing.T) {
+	s := fullSession()
+	s.RepairRounds = 3
+	s.FailureIdentities = []string{"check:lint", "setup:generate"}
+	s.FailureStreak = 2
+	raw, err := s.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := review.DecodeSession(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored, s) {
+		t.Fatalf("restored session: %#v", restored)
+	}
+}

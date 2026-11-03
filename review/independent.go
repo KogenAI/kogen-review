@@ -109,7 +109,10 @@ type Session struct {
 	Repaired bool `json:"repaired,omitempty"`
 	// Probes are the commands of the shell calls this review ran, in order: the probes its
 	// verdict's requirements may cite.
-	Probes []string `json:"probes,omitempty"`
+	Probes            []string `json:"probes,omitempty"`
+	RepairRounds      int      `json:"repair_rounds,omitempty"`
+	FailureIdentities []string `json:"failure_identities,omitempty"`
+	FailureStreak     int      `json:"failure_streak,omitempty"`
 }
 
 // Encode is the JSON a checkpoint keeps of the session.
@@ -158,9 +161,7 @@ type run struct {
 	// base is the green pass the review session was started from (nil when a resumed native
 	// session has none); it is recorded in every checkpoint of the session (Checkpoint.Base).
 	base *verify.Pass
-	// repairs counts the repair rounds of this review; invalid is set when it ended without a
-	// valid verdict.
-	repairs int
+	// invalid is set when the review ended without a valid verdict.
 	invalid *Invalid
 }
 
@@ -339,7 +340,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	feedback = delivery + feedback
 	r.pass = pass
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes,
+		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
@@ -419,7 +420,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 				e.Lines = append(e.Lines, fmt.Sprintf("review: %s:%s: %s", core.Display(f["path"]), core.Display(f["line"]), core.Display(f["message"])))
 			}
 		}
-		return Result{Record: review, Pass: r.pass, Repairs: r.repairs}, false, e
+		return Result{Record: review, Pass: r.pass, Repairs: r.sess.RepairRounds}, false, e
 	}
 
 	// An approval binds the seen tree: only an approval of the contents whose bytes reached the
@@ -441,7 +442,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		if err := env.Reviewed(approved); err != nil {
 			return Result{}, false, err
 		}
-		return Result{Record: approved, Pass: final, Repairs: r.repairs}, false, nil
+		return Result{Record: approved, Pass: final, Repairs: r.sess.RepairRounds}, false, nil
 	}
 
 	feedback, err := deliverySection(r.in.Candidate, seen, final.Tree)
@@ -458,16 +459,93 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		feedback += "Final verification of your repairs failed. Fix these failures and regressions from your edits; do not restart a whole-change critique. If observed evidence demonstrates a protected fixture defect, use submit_review changes with a blocking finding at that protected path instead of a production workaround, including a test-facing hidden comment.\n" +
 			env.Feedback(final, SubmitReviewTool)
 	}
-	r.repairs++
-	if err := env.Repaired(); err != nil {
-		return Result{}, false, err
+	r.sess.RepairRounds++
+	ids := failureIdentities(final)
+	if final.Green {
+		r.sess.FailureIdentities, r.sess.FailureStreak = nil, 0
+	} else {
+		if r.sess.FailureStreak > 0 && slices.Equal(ids, r.sess.FailureIdentities) {
+			r.sess.FailureStreak++
+		} else {
+			r.sess.FailureIdentities, r.sess.FailureStreak = ids, 1
+		}
+	}
+	if r.sess.FailureStreak >= 3 || r.sess.RepairRounds >= 20 {
+		reason := "repeated identical final failures"
+		if r.sess.FailureStreak < 3 {
+			reason = "repair round hard cap"
+		}
+		message := fmt.Sprintf("%s after %d repair rounds; current failing stage/items: %s", reason, r.sess.RepairRounds, strings.Join(ids, ", "))
+		finding := map[string]any{"path": "", "line": 0, "severity": "blocking", "message": message}
+		blocked := Verdict{Verdict: "changes", Findings: []map[string]any{finding}}
+		r.pass = final
+		r.sess.Verdict, r.sess.Tree, r.sess.Attempts = &blocked, final.Tree, attempts
+		r.sess.Repaired = true
+		if err := r.save(route.StageReviewVerify); err != nil {
+			return Result{}, false, err
+		}
+		if err := env.Repaired(); err != nil {
+			return Result{}, false, err
+		}
+		record := core.ReviewRecord{N: n, Verdict: "changes", Findings: blocked.Findings, Tree: final.Tree}
+		if err := env.Reviewed(record); err != nil {
+			return Result{}, false, err
+		}
+		if err := env.Write(File(n), map[string]any{"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage, "verdict": "changes", "findings": blocked.Findings, "tree": final.Tree, "attempts": attempts, "requirements": core.NonNil(verdict.Requirements)}); err != nil {
+			return Result{}, false, err
+		}
+		e := sys.Fail("candidate", "review_blocked", message, 1)
+		e.Lines = append(e.Lines, "review: "+message, feedback)
+		return Result{Record: record, Pass: final, Repairs: r.sess.RepairRounds}, false, e
 	}
 	r.pass = final
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes,
+		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
+	if err := r.save(route.StageReview); err != nil {
+		return Result{}, false, err
+	}
+	if err := env.Repaired(); err != nil {
+		return Result{}, false, err
+	}
 	return Result{}, true, nil
+}
+
+// failureIdentities uses the structured stages when available; Failing also carries
+// stage-qualified identities in saved and caller-supplied verification evidence.
+func failureIdentities(p verify.Pass) []string {
+	var ids []string
+	covered := map[string]bool{}
+	add := func(name, identity string) { covered[name] = true; ids = append(ids, identity) }
+	if p.Acceptance != nil && len(p.Acceptance.Problems) > 0 {
+		add("acceptance", "acceptance")
+	}
+	if p.Model.Failed() {
+		add("model", "model")
+	}
+	for _, m := range p.MaintainedModels {
+		if m.Result.Failed() {
+			add(m.Path, "model:"+m.Path)
+		}
+	}
+	for _, c := range p.Setup {
+		if c.Status != 0 {
+			add(c.Name, "setup:"+c.Name)
+		}
+	}
+	for _, c := range p.Checks {
+		if c.Status != 0 {
+			add(c.Name, "check:"+c.Name)
+		}
+	}
+	for _, name := range p.Failing {
+		if !covered[name] {
+			ids = append(ids, name)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
 }
 
 // converse is the reviewer's requests and tool calls until it submits a valid verdict. Two
