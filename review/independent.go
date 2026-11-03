@@ -53,6 +53,20 @@ var ToolNames = []string{"read_file", "view_image", "list_files", "search_text",
 type Verdict struct {
 	Verdict  string           `json:"verdict"`
 	Findings []map[string]any `json:"findings"`
+	// Requirements is the reviewer's evidence for each requirement of the approved Intent (none
+	// when the submission had no requirements).
+	Requirements []Requirement `json:"requirements,omitempty"`
+}
+
+// Requirement is one entry of a verdict's requirements: a requirement of the approved Intent,
+// the kind of evidence for it (test, acceptance, probe or none), its reference (the test or
+// acceptance step, or the exact shell command of the probe) and whether the evidence shows the
+// candidate meets it.
+type Requirement struct {
+	Requirement string `json:"requirement"`
+	Evidence    string `json:"evidence"`
+	Ref         string `json:"ref"`
+	Met         bool   `json:"met"`
 }
 
 // Submitted is one submitted verdict of a review: the pass it followed and the tree it
@@ -93,6 +107,9 @@ type Session struct {
 	// Repaired: a verdict of this review was already judged and sent back, so the pass it now
 	// works from may hold the reviewer's own verified edits rather than the builder's tree.
 	Repaired bool `json:"repaired,omitempty"`
+	// Probes are the commands of the shell calls this review ran, in order: the probes its
+	// verdict's requirements may cite.
+	Probes []string `json:"probes,omitempty"`
 }
 
 // Encode is the JSON a checkpoint keeps of the session.
@@ -322,7 +339,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	feedback = delivery + feedback
 	r.pass = pass
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree,
+		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
@@ -385,6 +402,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	if err := env.Write(File(n), map[string]any{
 		"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage,
 		"verdict": verdict.Verdict, "findings": findings, "tree": tree, "attempts": attempts,
+		"requirements": core.NonNil(verdict.Requirements),
 	}); err != nil {
 		return Result{}, false, err
 	}
@@ -446,7 +464,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	}
 	r.pass = final
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree,
+		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return Result{}, true, nil
@@ -552,6 +570,9 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				out, err := tl.Call(call)
 				if err != nil {
 					return Verdict{}, err
+				}
+				if command, _ := call.Args()["command"].(string); call.Name == "shell" && command != "" {
+					r.sess.Probes = append(r.sess.Probes, command)
 				}
 				if edits {
 					after, err := candidateTree(r.in.Candidate)
@@ -709,6 +730,8 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	case verdict == "approve" && blocking > 0:
 		problems = append(problems, "an approve verdict cannot have blocking findings")
 	}
+	requirements, reqProblems := r.requirements(args, verdict, findings, input)
+	problems = append(problems, reqProblems...)
 	if verdict == "changes" && !r.external {
 		unread, err := env.Unread(input)
 		if err != nil {
@@ -732,7 +755,80 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	if problems != nil {
 		return nil, problems, nil
 	}
-	return &Verdict{Verdict: verdict, Findings: findings}, nil, nil
+	return &Verdict{Verdict: verdict, Findings: findings, Requirements: requirements}, nil, nil
+}
+
+// requirements checks a submission's requirements: absent or null is none; otherwise an array of
+// {requirement, evidence, ref, met}. An approval needs evidence for every entry that shows it met
+// and, for the native reviewer, a probe it cites must be the command of a shell call of this
+// review; a changes verdict quotes each unmet requirement in a blocking finding.
+func (r *run) requirements(args map[string]any, verdict string, findings []map[string]any, input []any) ([]Requirement, []string) {
+	raw, present := args["requirements"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	shape := []string{"requirements must be a JSON array of objects with requirement (a non-empty string), evidence (test, acceptance, probe or none), ref (a string, non-empty unless evidence is none) and met (a boolean)"}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, shape
+	}
+	var out []Requirement
+	for _, item := range list {
+		m, _ := item.(map[string]any)
+		text, textOK := m["requirement"].(string)
+		evidence, _ := m["evidence"].(string)
+		ref, refOK := m["ref"].(string)
+		met, metOK := m["met"].(bool)
+		known := evidence == "test" || evidence == "acceptance" || evidence == "probe" || evidence == "none"
+		if m == nil || !textOK || text == "" || !known || !refOK || (ref == "" && evidence != "none") || !metOK {
+			return nil, shape
+		}
+		out = append(out, Requirement{Requirement: text, Evidence: evidence, Ref: ref, Met: met})
+	}
+	var problems []string
+	for _, q := range out {
+		quoted := "requirement \"" + q.Requirement + "\""
+		switch {
+		case verdict == "approve" && q.Evidence == "none":
+			problems = append(problems, quoted+" has no evidence: probe it with shell against the candidate before the verdict")
+		case verdict == "approve" && !q.Met:
+			problems = append(problems, quoted+" is not met: repair it, or submit changes with a blocking finding that quotes it")
+		case verdict == "approve" && q.Evidence == "probe" && !r.external && !r.ran(q.Ref, input):
+			problems = append(problems, quoted+" cites a probe that did not run in this review: run its command with shell before citing it")
+		case verdict == "changes" && !q.Met && !quotes(findings, q.Requirement):
+			problems = append(problems, quoted+" is not met: a changes verdict needs a blocking finding whose message quotes it")
+		}
+	}
+	return out, problems
+}
+
+// ran reports whether command is the command of a shell call of this review: one the session
+// recorded, or one in input.
+func (r *run) ran(command string, input []any) bool {
+	if slices.Contains(r.sess.Probes, command) {
+		return true
+	}
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		if m["type"] != "function_call" || m["name"] != "shell" {
+			continue
+		}
+		args, _ := m["arguments"].(string)
+		if c, _ := tools.DecodeArguments(args)["command"].(string); c == command {
+			return true
+		}
+	}
+	return false
+}
+
+// quotes reports whether a blocking finding's message contains text.
+func quotes(findings []map[string]any, text string) bool {
+	for _, f := range findings {
+		if message, _ := f["message"].(string); f["severity"] == "blocking" && strings.Contains(message, text) {
+			return true
+		}
+	}
+	return false
 }
 
 // reviewInteger is v when it is a JSON integer (not a float).

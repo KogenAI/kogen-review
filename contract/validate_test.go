@@ -94,3 +94,81 @@ func TestValidateRefusesAVerdictWithUnreadParts(t *testing.T) {
 	}
 	deepEq(t, "validate-unread verdict", *verdict, review.Verdict{Verdict: "approve", Findings: nil})
 }
+
+// TestValidateChecksTheRequirementsOfAVerdict pins the validation of submit_review's requirements
+// through review.Validate (item validate-requirements): absent or null is as before, a malformed
+// array gives the one shape problem without disclosing a submitted value, an approval needs
+// evidence, a met entry and a probe that ran, a changes verdict quotes each unmet requirement in
+// a blocking finding, and the accepted verdict carries the entries.
+func TestValidateChecksTheRequirementsOfAVerdict(t *testing.T) {
+	t.Parallel()
+	const shape = "requirements must be a JSON array of objects with requirement (a non-empty string), evidence (test, acceptance, probe or none), ref (a string, non-empty unless evidence is none) and met (a boolean)"
+	const noEvidence = `requirement "R1" has no evidence: probe it with shell against the candidate before the verdict`
+	const notMet = `requirement "R1" is not met: repair it, or submit changes with a blocking finding that quotes it`
+	const noProbe = `requirement "R1" cites a probe that did not run in this review: run its command with shell before citing it`
+	const unquoted = `requirement "R1" is not met: a changes verdict needs a blocking finding whose message quotes it`
+	entry := func(evidence, ref, met string) string {
+		return `{"requirement":"R1","evidence":"` + evidence + `","ref":"` + ref + `","met":` + met + `}`
+	}
+	blocking := func(message string) string {
+		return `{"path":"app.txt","line":1,"severity":"blocking","message":"` + message + `"}`
+	}
+	note := `{"path":"app.txt","line":1,"severity":"note","message":"about R1"}`
+	const needBlocking = "a changes verdict needs at least one blocking finding; "
+	approve := func(req string) string { return `{"verdict":"approve","findings":[],"requirements":` + req + `}` }
+	changes := func(finding, req string) string {
+		return `{"verdict":"changes","findings":[` + finding + `],"requirements":` + req + `}`
+	}
+	probeCall := map[string]any{"type": "function_call", "name": "shell", "call_id": "c1", "arguments": `{"command":"sh probe.sh"}`}
+	for i, tc := range []struct {
+		args    string
+		input   []any
+		problem string // "" accepts
+		entries int
+	}{
+		{`{"verdict":"approve","findings":[],"requirements":null}`, nil, "", 0},
+		{approve(`[]`), nil, "", 0},
+		{approve(`"R1"`), nil, shape, 0},
+		{approve(`{"requirement":"PRIVATE_REVIEW_MARKER"}`), nil, shape, 0},
+		{approve(`["PRIVATE_REVIEW_MARKER"]`), nil, shape, 0},
+		{approve(`[{"evidence":"test","ref":"t","met":true}]`), nil, shape, 0},
+		{approve(`[{"requirement":"","evidence":"test","ref":"t","met":true}]`), nil, shape, 0},
+		{approve(`[{"requirement":"PRIVATE_REVIEW_MARKER","evidence":"maybe","ref":"t","met":true}]`), nil, shape, 0},
+		{approve(`[{"requirement":"PRIVATE_REVIEW_MARKER","evidence":"test","ref":"","met":true}]`), nil, shape, 0},
+		{approve(`[{"requirement":"PRIVATE_REVIEW_MARKER","evidence":"test","ref":"t","met":"true"}]`), nil, shape, 0},
+		{approve(`[` + entry("test", "t", "true") + `,{"requirement":"PRIVATE_REVIEW_MARKER"}]`), nil, shape, 0},
+		{approve(`[` + entry("none", "", "false") + `]`), nil, noEvidence, 0},
+		{approve(`[` + entry("test", "t", "false") + `]`), nil, notMet, 0},
+		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), nil, noProbe, 0},
+		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), []any{probeCall}, "", 1},
+		{approve(`[` + entry("test", "t", "true") + `,` + entry("acceptance", "a", "true") + `]`), nil, "", 2},
+		{changes(blocking("R1 is missing"), `[`+entry("none", "", "false")+`]`), nil, "", 1},
+		{changes(blocking("R1 is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, "", 1},
+		{changes(blocking("it is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, unquoted, 0},
+		{changes(note, `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, needBlocking + unquoted, 0},
+		{changes(blocking("it is missing"), `[`+entry("none", "", "true")+`]`), nil, "", 1},
+	} {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			t.Parallel()
+			in, h := newReview(t)
+			verdict, problems, err := review.Validate(in, h, decodeArgs(t, tc.args), tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, "validate-requirements accepted "+tc.args, verdict != nil, tc.problem == "")
+			eq(t, "validate-requirements problem "+tc.args, strings.Join(problems, "; "), tc.problem)
+			if strings.Contains(strings.Join(problems, ""), "PRIVATE_REVIEW_MARKER") {
+				t.Error("validate-requirements: a submitted value was disclosed")
+			}
+			if verdict != nil {
+				eq(t, "validate-requirements entries "+tc.args, len(verdict.Requirements), tc.entries)
+			}
+		})
+	}
+	in, h := newReview(t)
+	verdict, _, err := review.Validate(in, h, decodeArgs(t, approve(`[`+entry("test", "t", "true")+`]`)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "validate-requirements verdict", *verdict, review.Verdict{Verdict: "approve", Requirements: []review.Requirement{{Requirement: "R1", Evidence: "test", Ref: "t", Met: true}}})
+}

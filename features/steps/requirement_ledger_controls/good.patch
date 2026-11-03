@@ -1,0 +1,227 @@
+diff --git a/review/independent.go b/review/independent.go
+index bf09924..d9a2764 100644
+--- a/review/independent.go
++++ b/review/independent.go
+@@ -53,6 +53,20 @@ var ToolNames = []string{"read_file", "view_image", "list_files", "search_text",
+ type Verdict struct {
+ 	Verdict  string           `json:"verdict"`
+ 	Findings []map[string]any `json:"findings"`
++	// Requirements is the reviewer's evidence for each requirement of the approved Intent (none
++	// when the submission had no requirements).
++	Requirements []Requirement `json:"requirements,omitempty"`
++}
++
++// Requirement is one entry of a verdict's requirements: a requirement of the approved Intent,
++// the kind of evidence for it (test, acceptance, probe or none), its reference (the test or
++// acceptance step, or the exact shell command of the probe) and whether the evidence shows the
++// candidate meets it.
++type Requirement struct {
++	Requirement string `json:"requirement"`
++	Evidence    string `json:"evidence"`
++	Ref         string `json:"ref"`
++	Met         bool   `json:"met"`
+ }
+ 
+ // Submitted is one submitted verdict of a review: the pass it followed and the tree it
+@@ -93,6 +107,9 @@ type Session struct {
+ 	// Repaired: a verdict of this review was already judged and sent back, so the pass it now
+ 	// works from may hold the reviewer's own verified edits rather than the builder's tree.
+ 	Repaired bool `json:"repaired,omitempty"`
++	// Probes are the commands of the shell calls this review ran, in order: the probes its
++	// verdict's requirements may cite.
++	Probes []string `json:"probes,omitempty"`
+ }
+ 
+ // Encode is the JSON a checkpoint keeps of the session.
+@@ -322,7 +339,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
+ 	feedback = delivery + feedback
+ 	r.pass = pass
+ 	r.sess = Session{
+-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree,
++		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes,
+ 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
+ 	}
+ 	return r.loop(ctx, nil, "")
+@@ -385,6 +402,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
+ 	if err := env.Write(File(n), map[string]any{
+ 		"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage,
+ 		"verdict": verdict.Verdict, "findings": findings, "tree": tree, "attempts": attempts,
++		"requirements": core.NonNil(verdict.Requirements),
+ 	}); err != nil {
+ 		return Result{}, false, err
+ 	}
+@@ -446,7 +464,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
+ 	}
+ 	r.pass = final
+ 	r.sess = Session{
+-		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree,
++		Role: r.sess.Role, Usage: r.sess.Usage, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes,
+ 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
+ 	}
+ 	return Result{}, true, nil
+@@ -553,6 +571,9 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
+ 				if err != nil {
+ 					return Verdict{}, err
+ 				}
++				if command, _ := call.Args()["command"].(string); call.Name == "shell" && command != "" {
++					r.sess.Probes = append(r.sess.Probes, command)
++				}
+ 				if edits {
+ 					after, err := candidateTree(r.in.Candidate)
+ 					if err != nil {
+@@ -709,6 +730,8 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
+ 	case verdict == "approve" && blocking > 0:
+ 		problems = append(problems, "an approve verdict cannot have blocking findings")
+ 	}
++	requirements, reqProblems := r.requirements(args, verdict, findings, input)
++	problems = append(problems, reqProblems...)
+ 	if verdict == "changes" && !r.external {
+ 		unread, err := env.Unread(input)
+ 		if err != nil {
+@@ -732,7 +755,80 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
+ 	if problems != nil {
+ 		return nil, problems, nil
+ 	}
+-	return &Verdict{Verdict: verdict, Findings: findings}, nil, nil
++	return &Verdict{Verdict: verdict, Findings: findings, Requirements: requirements}, nil, nil
++}
++
++// requirements checks a submission's requirements: absent or null is none; otherwise an array of
++// {requirement, evidence, ref, met}. An approval needs evidence for every entry that shows it met
++// and, for the native reviewer, a probe it cites must be the command of a shell call of this
++// review; a changes verdict quotes each unmet requirement in a blocking finding.
++func (r *run) requirements(args map[string]any, verdict string, findings []map[string]any, input []any) ([]Requirement, []string) {
++	raw, present := args["requirements"]
++	if !present || raw == nil {
++		return nil, nil
++	}
++	shape := []string{"requirements must be a JSON array of objects with requirement (a non-empty string), evidence (test, acceptance, probe or none), ref (a string, non-empty unless evidence is none) and met (a boolean)"}
++	list, ok := raw.([]any)
++	if !ok {
++		return nil, shape
++	}
++	var out []Requirement
++	for _, item := range list {
++		m, _ := item.(map[string]any)
++		text, textOK := m["requirement"].(string)
++		evidence, _ := m["evidence"].(string)
++		ref, refOK := m["ref"].(string)
++		met, metOK := m["met"].(bool)
++		known := evidence == "test" || evidence == "acceptance" || evidence == "probe" || evidence == "none"
++		if m == nil || !textOK || text == "" || !known || !refOK || (ref == "" && evidence != "none") || !metOK {
++			return nil, shape
++		}
++		out = append(out, Requirement{Requirement: text, Evidence: evidence, Ref: ref, Met: met})
++	}
++	var problems []string
++	for _, q := range out {
++		quoted := "requirement \"" + q.Requirement + "\""
++		switch {
++		case verdict == "approve" && q.Evidence == "none":
++			problems = append(problems, quoted+" has no evidence: probe it with shell against the candidate before the verdict")
++		case verdict == "approve" && !q.Met:
++			problems = append(problems, quoted+" is not met: repair it, or submit changes with a blocking finding that quotes it")
++		case verdict == "approve" && q.Evidence == "probe" && !r.external && !r.ran(q.Ref, input):
++			problems = append(problems, quoted+" cites a probe that did not run in this review: run its command with shell before citing it")
++		case verdict == "changes" && !q.Met && !quotes(findings, q.Requirement):
++			problems = append(problems, quoted+" is not met: a changes verdict needs a blocking finding whose message quotes it")
++		}
++	}
++	return out, problems
++}
++
++// ran reports whether command is the command of a shell call of this review: one the session
++// recorded, or one in input.
++func (r *run) ran(command string, input []any) bool {
++	if slices.Contains(r.sess.Probes, command) {
++		return true
++	}
++	for _, item := range input {
++		m, _ := item.(map[string]any)
++		if m["type"] != "function_call" || m["name"] != "shell" {
++			continue
++		}
++		args, _ := m["arguments"].(string)
++		if c, _ := tools.DecodeArguments(args)["command"].(string); c == command {
++			return true
++		}
++	}
++	return false
++}
++
++// quotes reports whether a blocking finding's message contains text.
++func quotes(findings []map[string]any, text string) bool {
++	for _, f := range findings {
++		if message, _ := f["message"].(string); f["severity"] == "blocking" && strings.Contains(message, text) {
++			return true
++		}
++	}
++	return false
+ }
+ 
+ // reviewInteger is v when it is a JSON integer (not a float).
+diff --git a/review/policy.go b/review/policy.go
+index 0c71a5a..bc246b9 100644
+--- a/review/policy.go
++++ b/review/policy.go
+@@ -21,6 +21,10 @@ const SubmitReviewTool = "submit_review"
+ // instructions and the external review task both carry it.
+ const LimitRaises = "Limit raises: a change that raises a timeout, deadline, retry or attempt count, size or count limit, or wait duration (in code, configuration, tests or scripts, including go test -timeout, Playwright or cucumber timeouts and ExUnit timeouts) is a blocking finding unless the Intent, or a profile cited in the change, shows that the extra work is needed and cannot be removed. The finding names the file:line, the old and new value, and asks for the profile or a speed-up. Lowering a limit, or adding a new bound where none existed, is not flagged by this rule."
+ 
++// RequirementsRule is the review rule on evidence for each requirement of the approved Intent;
++// the native reviewer's instructions and the external review task both carry it.
++const RequirementsRule = "Requirements: before any verdict, work through the approved Intent's concrete, observable requirements one by one and name, for each, the evidence that the candidate meets it: an existing test or acceptance step that exercises it, or a probe you ran with shell against the candidate in this review. A test or step is evidence only for the inputs it exercises: when a requirement states or implies an empty, zero or limit input that none exercises, that input needs a probe. Probe each requirement without evidence before the verdict, in your probe round, with a small focused run of the inputs it states or implies, including that empty, zero or limit input. A probe that shows the behavior missing or wrong is a substantive defect: repair it with regression coverage or, when that is not possible within the approved scope, submit changes with a blocking finding whose message quotes the requirement. Sentences that are not observable, such as a statement of purpose, and wording that only restates the acceptance scenarios need no probe of their own. Record the mapping in submit_review's requirements, one entry per requirement: requirement (quoted from the Intent), evidence (test, acceptance, probe, or none while nothing exercises it), ref (the test or acceptance step, or the exact shell command of the probe; empty for none) and met (whether that evidence shows the candidate meets the requirement). Kogen rejects an approval with an entry whose evidence is none or whose met is false and, when it sees your tool calls, one whose probe command did not run in this review; a changes verdict quotes each unmet requirement in a blocking finding."
++
+ func promptFile(name string) string {
+ 	b, err := promptFiles.ReadFile("prompts/" + name + ".md")
+ 	if err != nil {
+@@ -32,7 +36,7 @@ func promptFile(name string) string {
+ // ReviewerInstructions are the native reviewer's instructions, byte for byte what the model
+ // receives: the reviewer prompt and the limit-raise rule.
+ func ReviewerInstructions() string {
+-	return promptFile("reviewer") + "\n" + LimitRaises + "\n"
++	return promptFile("reviewer") + "\n" + LimitRaises + "\n" + RequirementsRule + "\n"
+ }
+ 
+ // ReviewerToolDefinitions returns the model-facing definition of each named tool, in order: the
+@@ -64,7 +68,7 @@ func submitReviewDef() map[string]any {
+ 		"type":        "function",
+ 		"name":        SubmitReviewTool,
+ 		"strict":      false,
+-		"description": "Submit the review: verdict approve or changes, with findings.",
++		"description": "Submit the review: verdict approve or changes, with findings and the evidence for each requirement.",
+ 		"parameters": map[string]any{
+ 			"type": "object",
+ 			"properties": map[string]any{
+@@ -82,6 +86,19 @@ func submitReviewDef() map[string]any {
+ 						"required": []any{"path", "line", "severity", "message"},
+ 					},
+ 				},
++				"requirements": map[string]any{
++					"type": "array",
++					"items": map[string]any{
++						"type": "object",
++						"properties": map[string]any{
++							"requirement": str(),
++							"evidence":    map[string]any{"type": "string", "enum": []any{"test", "acceptance", "probe", "none"}},
++							"ref":         str(),
++							"met":         map[string]any{"type": "boolean"},
++						},
++						"required": []any{"requirement", "evidence", "ref", "met"},
++					},
++				},
+ 			},
+ 			"required": []any{"verdict", "findings"},
+ 		},
+diff --git a/review/prompts/reviewer.md b/review/prompts/reviewer.md
+index be9b0f6..a8b7911 100644
+--- a/review/prompts/reviewer.md
++++ b/review/prompts/reviewer.md
+@@ -1,6 +1,6 @@
+ You review code that another model wrote to implement an approved Intent in this repository. The initial independent review follows a green pass; continued targeted requests may instead contain fresh red or unrun results, which supersede earlier green evidence. Perform one cohesive review and directly repair supported defects within that Intent using read_file, view_image, list_files, search_text, write_file and shell. You are a reviewer and fixer, not a source of serial suggestions for another builder. You do not see the builder's conversation.
+ 
+-Complete current source is supplied inline, or, when the initial source exceeds the local window, in explicitly pinned private source parts with a complete path/mode/hash catalog. Read every pinned part through read_file before approving; a pointer alone is not inspection. The parts preserve the full diff and current text without clipping. New files appear once with their modes; the diff covers existing/deleted paths. Read other files only to fill a context gap. Every request re-sends the whole conversation, so work in a few wide rounds, not one call per turn: issue all pinned-part reads and needed context lookups together in your first tool round; never re-read text already supplied inline or read earlier; then make related repairs together and run your focused probes (stated limits, empty or zero values, error paths) in one combined shell command where possible. Code that proves correct usually needs only three rounds: reads, one probe round, then submit_review. Add a round only when a result raises a new concern or a repair needs checking; after a repair, run the configured fixer and the focused tests together in one command. Never spend a round on a lone lookup or on re-confirming a result you already have.
++Complete current source is supplied inline, or, when the initial source exceeds the local window, in explicitly pinned private source parts with a complete path/mode/hash catalog. Read every pinned part through read_file before approving; a pointer alone is not inspection. The parts preserve the full diff and current text without clipping. New files appear once with their modes; the diff covers existing/deleted paths. Read other files only to fill a context gap. Every request re-sends the whole conversation, so work in a few wide rounds, not one call per turn: issue all pinned-part reads and needed context lookups together in your first tool round; never re-read text already supplied inline or read earlier; then make related repairs together and run your focused probes (each requirement without evidence, stated limits, empty or zero values, error paths) in one combined shell command where possible. Code whose requirements all have evidence usually needs only three rounds: reads, one probe round, then submit_review. Add a round only when a result raises a new concern or a repair needs checking; after a repair, run the configured fixer and the focused tests together in one command. Never spend a round on a lone lookup or on re-confirming a result you already have.
+ 
+ For each substantive concern, establish the applicable requirement, a concrete violating path or counterexample, and its observable consequence. Do not invent extra requirements or turn hypothetical future refactors into defects. Inspect the affected behavior thoroughly and resolve the supported defects together.
+ 

@@ -188,3 +188,55 @@ func TestIndependentApprovalOfAnUnverifiedTreeIsVerifiedFirst(t *testing.T) {
 		t.Errorf("independent-exact-tree progress: %q", h.progress)
 	}
 }
+
+// shellCall is a model answer calling shell with command.
+func shellCall(command string) *provider.Response {
+	return &provider.Response{Items: []map[string]any{{
+		"type": "function_call", "call_id": "call-shell", "name": "shell", "arguments": `{"command":"` + command + `"}`,
+	}}, Usage: provider.Usage{Input: 10, Output: 2}}
+}
+
+// TestIndependentReviewRecordsItsProbesAndRequirements pins that the native review records the
+// command of each shell call in Session.Probes, keeps it in the checkpoint and carries it through
+// a repair round, that a probe it ran may be cited, and that review-1.json keeps the
+// requirements, [] when the submission had none (items session-probes, review-requirements).
+func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	h.answers = []*provider.Response{shellCall("echo probed"), submitReview(`{"verdict":"approve","findings":[]}`)}
+	if _, err := (review.Independent{}).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "session-probes checkpoint", s.Probes, []string{"echo probed"})
+	rec := readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
+	deepEq(t, "review-requirements empty", rec["requirements"], any([]any{}))
+
+	// A repair round carries the probes forward, and a probe cited after it has run is accepted.
+	in, h = newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+	const cited = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"echo probed","met":true}]}`
+	h.answers = []*provider.Response{shellCall("echo probed"), submitReview(cited), submitReview(cited)}
+	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
+	ap, err := review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "session-probes repaired requests", len(h.requests), 3)
+	eq(t, "session-probes repaired record", ap.Record.Verdict, "approve")
+	var carried bool
+	for _, c := range h.saves {
+		if s, err := review.DecodeSession(c.Session); err == nil && s.Repaired && slices.Equal(s.Probes, []string{"echo probed"}) {
+			carried = true
+		}
+	}
+	if !carried {
+		t.Error("session-probes: no checkpoint after the repair round kept the probes")
+	}
+	rec = readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
+	reqs, _ := rec["requirements"].([]any)
+	eq(t, "review-requirements entries", len(reqs), 1)
+}

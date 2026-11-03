@@ -150,7 +150,7 @@ func mustJSON(t *testing.T, v any) []byte {
 }
 
 const reviewerOldSentence = "Read other files only to fill a context gap, and batch independent lookups."
-const reviewerBatchParagraph = "Read other files only to fill a context gap. Every request re-sends the whole conversation, so work in a few wide rounds, not one call per turn: issue all pinned-part reads and needed context lookups together in your first tool round; never re-read text already supplied inline or read earlier; then make related repairs together and run your focused probes (stated limits, empty or zero values, error paths) in one combined shell command where possible. Code that proves correct usually needs only three rounds: reads, one probe round, then submit_review. Add a round only when a result raises a new concern or a repair needs checking; after a repair, run the configured fixer and the focused tests together in one command. Never spend a round on a lone lookup or on re-confirming a result you already have."
+const reviewerBatchParagraph = "Read other files only to fill a context gap. Every request re-sends the whole conversation, so work in a few wide rounds, not one call per turn: issue all pinned-part reads and needed context lookups together in your first tool round; never re-read text already supplied inline or read earlier; then make related repairs together and run your focused probes (each requirement without evidence, stated limits, empty or zero values, error paths) in one combined shell command where possible. Code whose requirements all have evidence usually needs only three rounds: reads, one probe round, then submit_review. Add a round only when a result raises a new concern or a repair needs checking; after a repair, run the configured fixer and the focused tests together in one command. Never spend a round on a lone lookup or on re-confirming a result you already have."
 
 // TestReviewerBatchPromptBytesAndUnchangedSchema pins the batching paragraph and the reviewer's
 // bytes. In kogen-executor it also hashed the source of agent/defs.go to keep the review schema
@@ -161,11 +161,14 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	if strings.Count(text, LimitRaises) != 1 {
 		t.Fatal("reviewer must carry the limit rule once")
 	}
+	if strings.Count(text, RequirementsRule) != 1 {
+		t.Fatal("reviewer must carry the requirements rule once")
+	}
 	text = strings.Replace(text, "\n"+LimitRaises+"\n", "", 1)
 	if strings.Contains(text, reviewerOldSentence) || strings.Count(text, reviewerBatchParagraph) != 1 {
 		t.Fatal("reviewer must replace exactly the old batching sentence")
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "1ab7ff81c6b94254ac71958230859fd9c76ffc15baa25ad2552017cbd11cceb9" {
+	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "f9b82f3df578171f64ee4891fe46bc4171b8b3ebbc26b298d284378d1ed2e646" {
 		t.Fatalf("reviewer hash = %s", got)
 	}
 	data, err := os.ReadFile("testdata/defs_golden.json")
@@ -182,5 +185,16 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	}
 	if !bytes.Equal(mustJSON(t, got), mustJSON(t, recorded[SubmitReviewTool])) {
 		t.Fatalf("review schema = %s", mustJSON(t, got))
+	}
+}
+
+// TestExternalReviewTaskCarriesTheRequirementsRule pins the external review task text in both its
+// whole-source and parts forms.
+func TestExternalReviewTaskCarriesTheRequirementsRule(t *testing.T) {
+	const final = "Finish with the structured verdict: verdict approve or changes, findings {path, line, severity blocking|note, message} and requirements {requirement, evidence test|acceptance|probe|none, ref, met}. A changes verdict needs a blocking finding; an approve verdict has none."
+	for name, task := range map[string]string{"reviewTask": reviewTask, "reviewPartsTask": reviewPartsTask} {
+		if strings.Count(task, RequirementsRule) != 1 || !strings.Contains(task, LimitRaises+"\n"+RequirementsRule+"\n"+final) {
+			t.Errorf("%s does not carry the requirements rule after the limit rule and the new final sentence", name)
+		}
 	}
 }

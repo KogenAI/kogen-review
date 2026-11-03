@@ -114,3 +114,27 @@ func TestExternalReviewHasNoResume(t *testing.T) {
 	e := wantError(t, "external-resume", err, "candidate", "resume_refused")
 	eq(t, "external-resume detail", e.Detail, "an independent review by an external executor cannot be resumed (resume capability: none)")
 }
+
+// TestExternalReviewRequirementsSkipTheProbeCheck pins that an external reviewer's approval citing
+// a probe is accepted, as Kogen cannot see its tool calls, while an approval whose requirement has
+// no evidence is sent back with its problem (item external-requirements).
+func TestExternalReviewRequirementsSkipTheProbeCheck(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"sh probe.sh","met":true}]}`)}}
+	ap, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "external-requirements verdict", ap.Record.Verdict, "approve")
+
+	in, h = newReview(t)
+	x = &fakeExecutor{t: t, results: []executor.RoundResult{
+		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"none","ref":"","met":false}]}`),
+		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"sh probe.sh","met":true}]}`)}}
+	if _, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "external-requirements feedback", x.inputs[1].Feedback,
+		`Not a valid verdict: requirement "R1" has no evidence: probe it with shell against the candidate before the verdict. Submit a corrected structured verdict.`)
+}

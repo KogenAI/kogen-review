@@ -29,7 +29,8 @@ const reviewPartsTask = "# Review task\n\n" +
 
 const reviewTaskTail = "Repair concrete defects within the approved Intent with your tools; protected paths cannot be edited. Maintenance preferences are non-blocking notes.\n" +
 	LimitRaises + "\n" +
-	"Finish with the structured verdict: verdict approve or changes, and findings {path, line, severity blocking|note, message}. A changes verdict needs a blocking finding; an approve verdict has none. Kogen verifies any contents you changed and tells you the actual results."
+	RequirementsRule + "\n" +
+	"Finish with the structured verdict: verdict approve or changes, findings {path, line, severity blocking|note, message} and requirements {requirement, evidence test|acceptance|probe|none, ref, met}. A changes verdict needs a blocking finding; an approve verdict has none. Kogen verifies any contents you changed and tells you the actual results."
 
 // reviewCeiling is the inclusive ceiling of one external review prompt.
 const reviewCeiling = tools.InputBudgetBytes

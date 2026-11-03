@@ -1,6 +1,6 @@
 {
   "submit_review": {
-    "description": "Submit the review: verdict approve or changes, with findings.",
+    "description": "Submit the review: verdict approve or changes, with findings and the evidence for each requirement.",
     "name": "submit_review",
     "parameters": {
       "properties": {
@@ -29,6 +29,38 @@
               "line",
               "severity",
               "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "requirements": {
+          "items": {
+            "properties": {
+              "evidence": {
+                "enum": [
+                  "test",
+                  "acceptance",
+                  "probe",
+                  "none"
+                ],
+                "type": "string"
+              },
+              "met": {
+                "type": "boolean"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "requirement": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "requirement",
+              "evidence",
+              "ref",
+              "met"
             ],
             "type": "object"
           },
