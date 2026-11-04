@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 type parameterContract struct {

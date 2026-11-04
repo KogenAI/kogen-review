@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/KogenAI/kogen-executor/core"
-	"kogen-loop/provider"
-	"kogen-loop/sys"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // The reviewer's own working-context reset. The caller's working window stays the caller's: the

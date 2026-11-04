@@ -4,9 +4,9 @@ import (
 	"context"
 	"io"
 
-	"kogen-loop/provider"
-	"kogen-loop/sys"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // The exported API kogen-review uses of kogen-loop, pinned at compile time: a change of a

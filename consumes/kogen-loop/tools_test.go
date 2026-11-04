@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"kogen-loop/sys"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // response items as a model's answer carries them.

@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/KogenAI/kogen-executor/executor"
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // An external reviewer's first prompt is measured, source included, against the inclusive input

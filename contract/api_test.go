@@ -8,10 +8,10 @@ import (
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
+	"github.com/KogenAI/kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/tools"
 	"github.com/KogenAI/kogen-review/review"
 	"github.com/KogenAI/kogen-verification/verify"
-	"kogen-loop/sys"
-	"kogen-loop/tools"
 )
 
 // The exported API kogen-build calls, pinned at compile time: a change of a signature, a type

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"kogen-loop/provider"
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // offline is a session whose environment is a HOME of its own: no sign-in, no key, no seam.

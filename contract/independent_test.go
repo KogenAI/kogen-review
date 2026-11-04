@@ -9,9 +9,9 @@ import (
 
 	"github.com/KogenAI/kogen-coordinator/route"
 	"github.com/KogenAI/kogen-executor/core"
+	"github.com/KogenAI/kogen-loop/provider"
 	"github.com/KogenAI/kogen-review/review"
 	"github.com/KogenAI/kogen-verification/verify"
-	"kogen-loop/provider"
 )
 
 // stages are the stages a review recorded, consecutive repeats merged.

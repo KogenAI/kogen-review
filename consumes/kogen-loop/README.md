@@ -1,6 +1,6 @@
 # kogen-loop consumes suite
 
-This package states what kogen-review relies on from kogen-loop (module `kogen-loop`, which `go.mod` replaces with `github.com/KogenAI/kogen-loop`), at the version `go.mod` pins now (`v0.0.0-20261102055344-c6e2360290d4`). It is the consumer side of the two-sided contract: kogen-loop's own suites state what it provides, this one states exactly what kogen-review uses of it, so a change to kogen-loop that kogen-review would feel fails here, in kogen-review's own `go test ./...`, without building kogen-review against it. It asserts nothing kogen-review does not use. kogen-review's `contract/` (what kogen-review provides) is unchanged.
+This package states what kogen-review relies on from kogen-loop (module `github.com/KogenAI/kogen-loop`), at the version `go.mod` pins now (`v0.0.0-20261104063532-dea3eb375dba`). It is the consumer side of the two-sided contract: kogen-loop's own suites state what it provides, this one states exactly what kogen-review uses of it, so a change to kogen-loop that kogen-review would feel fails here, in kogen-review's own `go test ./...`, without building kogen-review against it. It asserts nothing kogen-review does not use. kogen-review's `contract/` (what kogen-review provides) is unchanged.
 
 Run it with the rest of the module, or alone:
 
@@ -23,10 +23,10 @@ Every item is asserted so that changing what kogen-review relies on fails the su
 
 ## Coverage check
 
-The inventory below was derived with a go/types observer over the non-test Go files of kogen-review's packages outside `contract/`, `consumes/` and `features/` (`review`, `cmd/kogen-review`): every identifier that resolves (`Uses` or `Selections`) to an exported package-level object of a package of module `kogen-loop`, or to a method or field of one of its named types, named `pkg.Name` or `pkg.Type.Member` by the declaring type (53 uses). The same observer, run on the checkout, compares that list with the identifiers the tests of this package name and with this inventory; it must print `ok`:
+The inventory below was derived with a go/types observer over the non-test Go files of kogen-review's packages outside `contract/`, `consumes/` and `features/` (`review`, `cmd/kogen-review`): every identifier that resolves (`Uses` or `Selections`) to an exported package-level object of a package of module `github.com/KogenAI/kogen-loop`, or to a method or field of one of its named types, named `pkg.Name` or `pkg.Type.Member` by the declaring type (53 uses). The same observer, run on the checkout, compares that list with the identifiers the tests of this package name and with this inventory; it must print `ok`:
 
 ```sh
-d=$(mktemp -d) && node -e "process.stdout.write(require('./features/steps/k-consumes-review__observer.js').source)" > "$d/main.go" && printf 'module observer\n\ngo 1.27\n' > "$d/go.mod" && (cd "$d" && go build -o observer .) && "$d/observer" . kogen-coordinator=github.com/KogenAI/kogen-coordinator kogen-executor=github.com/KogenAI/kogen-executor kogen-loop=kogen-loop kogen-verification=github.com/KogenAI/kogen-verification
+d=$(mktemp -d) && node -e "process.stdout.write(require('./features/steps/k-consumes-review__observer.js').source)" > "$d/main.go" && printf 'module observer\n\ngo 1.27\n' > "$d/go.mod" && (cd "$d" && go build -o observer .) && "$d/observer" . kogen-coordinator=github.com/KogenAI/kogen-coordinator kogen-executor=github.com/KogenAI/kogen-executor kogen-loop=github.com/KogenAI/kogen-loop kogen-verification=github.com/KogenAI/kogen-verification
 ```
 
 ## Inventory

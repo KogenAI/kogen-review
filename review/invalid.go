@@ -2,8 +2,8 @@ package review
 
 import (
 	"github.com/KogenAI/kogen-executor/core"
-	"kogen-loop/provider"
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/provider"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // A review that ends without a valid verdict returns its Invalid with the

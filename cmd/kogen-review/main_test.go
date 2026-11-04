@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/KogenAI/kogen-executor/core"
+	"github.com/KogenAI/kogen-loop/sys"
 	"github.com/KogenAI/kogen-review/review"
-	"kogen-loop/sys"
 )
 
 func TestInitialVerificationStops(t *testing.T) {

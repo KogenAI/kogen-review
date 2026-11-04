@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"testing"
 
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // kogen-review stops with sys.Fail and reads the stop back with sys.AsError

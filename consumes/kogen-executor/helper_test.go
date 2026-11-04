@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"kogen-loop/sys"
+	"github.com/KogenAI/kogen-loop/sys"
 )
 
 // eq fails with the inventory item it checks when got is not want.

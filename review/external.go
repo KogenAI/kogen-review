@@ -14,8 +14,8 @@ import (
 	"github.com/KogenAI/kogen-coordinator/route"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
+	"github.com/KogenAI/kogen-loop/sys"
 	"github.com/KogenAI/kogen-verification/verify"
-	"kogen-loop/sys"
 )
 
 // External is the independent review by an external executor (Claude Code): the review

@@ -4,7 +4,7 @@ import (
 	"embed"
 	"fmt"
 
-	"kogen-loop/tools"
+	"github.com/KogenAI/kogen-loop/tools"
 )
 
 // The reviewer's model-facing policy, owned here: its instructions (prompts/reviewer.md and the
