@@ -76,12 +76,15 @@ var (
 			Round: func(context.Context, executor.Session, executor.Input) (executor.RoundResult, error) {
 				return executor.RoundResult{}, nil
 			},
-			Home: "",
+			Home:        "",
+			Restriction: &review.Restriction{Name: "", Refused: func(tools.Call) []string { return nil }},
 		},
 		Checkpoint: &review.Checkpoint{Stage: "", Pass: &verify.Pass{}, Base: &verify.Pass{}, Session: json.RawMessage{}},
 		Number:     0, Last: &core.ReviewRecord{}, Executor: &core.ExecutorState{}, Run: review.Run{ID: "", Dir: ""},
 	}
-	_ = review.Result{Record: core.ReviewRecord{}, Pass: verify.Pass{}, Repairs: 0, Invalid: &review.Invalid{}}
+	_ = review.Result{Record: core.ReviewRecord{}, Pass: verify.Pass{}, Repairs: 0, Invalid: &review.Invalid{}, Environment: &review.Environment{}}
+	_ = review.Environment{ReviewerRestricted: false, OuterGatesRestricted: false, Restriction: "", Limitations: []review.Limitation{{Check: "", Refused: []string{}}}}
+	_ = review.ProbeRun{Command: "", Status: nil, Tree: "", Refused: []string{}}
 	_ = review.Invalid{Review: 0, ForcedRoute: "", ForcedModel: "", Reason: "", Problems: []string{}, RejectedVerdict: 0,
 		NoToolReminder: 0, Pass: verify.Pass{}, Base: &verify.Pass{}, Reopened: false, Repaired: false}
 	_ = review.Request{Role: project.Role{}, Instructions: "", Input: []any{}, Tools: []any{},

@@ -111,6 +111,37 @@ type Tools struct {
 	Round func(ctx context.Context, sess executor.Session, in executor.Input) (executor.RoundResult, error)
 	// Home is the home folder an external reviewer's session runs with.
 	Home string
+	// Restriction is the execution restriction the reviewer's native commands run under (nil: they
+	// run with the outer gates' permissions).
+	Restriction *Restriction
+}
+
+// Restriction is an execution restriction the reviewer's native commands run under and the
+// outer gates (Kogen's verification of the candidate, the Build's final gates) do not.
+type Restriction struct {
+	// Name describes the restriction, as the review record states it.
+	Name string
+	// Refused are the operations the restriction itself refused during the native shell call
+	// that has just returned, as the restriction reports them (for example
+	// "bind: operation not permitted"); none when it refused nothing. It is the restriction's
+	// own report, never read from the call's output.
+	Refused func(call tools.Call) []string
+}
+
+// Environment is how a restricted review's permissions differed from the outer gates' and
+// the reviewer checks the restriction refused.
+type Environment struct {
+	ReviewerRestricted   bool         `json:"reviewer_restricted"`
+	OuterGatesRestricted bool         `json:"outer_gates_restricted"`
+	Restriction          string       `json:"restriction"`
+	Limitations          []Limitation `json:"limitations"`
+}
+
+// Limitation is one reviewer check the restriction refused: its shell command and the
+// operations refused.
+type Limitation struct {
+	Check   string   `json:"check"`
+	Refused []string `json:"refused"`
 }
 
 // Checkpoint is a Review checkpoint: the stage (route.StageReview, StageReviewVerify or
@@ -142,6 +173,8 @@ type Result struct {
 	Pass    verify.Pass
 	Repairs int
 	Invalid *Invalid
+	// Environment is set when the review ran under a Restriction: nil otherwise.
+	Environment *Environment
 }
 
 // Invalid is what a review that ended without a valid verdict leaves for its caller: the

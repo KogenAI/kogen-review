@@ -77,6 +77,8 @@ type ProbeRun struct {
 	Command string `json:"command"`
 	Status  *int   `json:"status"`
 	Tree    string `json:"tree"`
+	// Refused are the operations the reviewer's restriction reported refusing during the call.
+	Refused []string `json:"refused,omitempty"`
 }
 
 // Submitted is one submitted verdict of a review: the pass it followed and the tree it
@@ -450,11 +452,11 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		}
 	}
 	env.Progress(fmt.Sprintf("kogen: review %d: %s, %d blocking", n, verdict.Verdict, blocking))
-	if err := env.Write(File(n), map[string]any{
+	if err := env.Write(File(n), r.withEnvironment(map[string]any{
 		"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage,
 		"verdict": verdict.Verdict, "findings": findings, "tree": tree, "attempts": attempts,
 		"requirements": core.NonNil(verdict.Requirements),
-	}); err != nil {
+	})); err != nil {
 		return Result{}, false, err
 	}
 	env.Event(map[string]any{
@@ -470,7 +472,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 				e.Lines = append(e.Lines, fmt.Sprintf("review: %s:%s: %s", core.Display(f["path"]), core.Display(f["line"]), core.Display(f["message"])))
 			}
 		}
-		return Result{Record: review, Pass: r.pass, Repairs: r.sess.RepairRounds}, false, e
+		return Result{Record: review, Pass: r.pass, Repairs: r.sess.RepairRounds, Environment: r.environment()}, false, e
 	}
 
 	// An approval binds the seen tree: only an approval of the contents whose bytes reached the
@@ -492,7 +494,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		if err := env.Reviewed(approved); err != nil {
 			return Result{}, false, err
 		}
-		return Result{Record: approved, Pass: final, Repairs: r.sess.RepairRounds}, false, nil
+		return Result{Record: approved, Pass: final, Repairs: r.sess.RepairRounds, Environment: r.environment()}, false, nil
 	}
 
 	feedback, err := deliverySection(r.in.Candidate, seen, final.Tree)
@@ -542,12 +544,12 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		if err := env.Reviewed(record); err != nil {
 			return Result{}, false, err
 		}
-		if err := env.Write(File(n), map[string]any{"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage, "verdict": "changes", "findings": blocked.Findings, "tree": final.Tree, "attempts": attempts, "requirements": core.NonNil(verdict.Requirements)}); err != nil {
+		if err := env.Write(File(n), r.withEnvironment(map[string]any{"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage, "verdict": "changes", "findings": blocked.Findings, "tree": final.Tree, "attempts": attempts, "requirements": core.NonNil(verdict.Requirements)})); err != nil {
 			return Result{}, false, err
 		}
 		e := sys.Fail("candidate", "review_blocked", message, 1)
 		e.Lines = append(e.Lines, "review: "+message, feedback)
-		return Result{Record: record, Pass: final, Repairs: r.sess.RepairRounds}, false, e
+		return Result{Record: record, Pass: final, Repairs: r.sess.RepairRounds, Environment: r.environment()}, false, e
 	}
 	r.pass = final
 	r.sess = Session{
@@ -562,6 +564,29 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		return Result{}, false, err
 	}
 	return Result{}, true, nil
+}
+
+// environment is the review's Environment: nil without a restriction.
+func (r *run) environment() *Environment {
+	rs := r.in.Tools.Restriction
+	if rs == nil {
+		return nil
+	}
+	env := &Environment{ReviewerRestricted: true, Restriction: rs.Name, Limitations: []Limitation{}}
+	for _, pr := range r.sess.ProbeRuns {
+		if len(pr.Refused) > 0 {
+			env.Limitations = append(env.Limitations, Limitation{Check: pr.Command, Refused: pr.Refused})
+		}
+	}
+	return env
+}
+
+// withEnvironment adds the review's environment to a review record's fields when it has one.
+func (r *run) withEnvironment(record map[string]any) map[string]any {
+	if env := r.environment(); env != nil {
+		record["environment"] = env
+	}
+	return record
 }
 
 // failureIdentities uses the structured stages when available; Failing also carries
@@ -753,7 +778,11 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 						return Verdict{}, err
 					}
 					if probe {
-						r.sess.ProbeRuns = append(r.sess.ProbeRuns, ProbeRun{Command: command, Status: exitStatus(out.Text), Tree: after})
+						pr := ProbeRun{Command: command, Status: exitStatus(out.Text), Tree: after}
+						if rs := r.in.Tools.Restriction; rs != nil && rs.Refused != nil {
+							pr.Refused = rs.Refused(call)
+						}
+						r.sess.ProbeRuns = append(r.sess.ProbeRuns, pr)
 					}
 					if before == r.seenTree() {
 						r.sess.Seen = after
@@ -1086,6 +1115,13 @@ func (e *evidenceCheck) names(command string) (bool, error) {
 
 // probe is the problem of a cited probe that does not establish its requirement, or "".
 func (e *evidenceCheck) probe(quoted, command string, input []any) (string, error) {
+	if refused := e.r.latestRun(command, input).Refused; len(refused) > 0 {
+		name := ""
+		if rs := e.r.in.Tools.Restriction; rs != nil {
+			name = rs.Name
+		}
+		return quoted + " cites probe \"" + command + "\", which is unrun-by-environment: the reviewer's restricted execution (" + name + ") refused " + strings.Join(refused, "; ") + " in its latest run, and the outer gates run without this restriction; a check the restriction refused is an environment limitation, neither evidence nor a candidate defect; cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run", nil
+	}
 	named, err := e.names(command)
 	if err != nil {
 		return "", err
