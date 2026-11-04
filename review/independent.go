@@ -50,6 +50,9 @@ import (
 // conversation after the verdict; in `review_retry_verify` the conversation the explicit
 // resume continues after fresh verification.
 
+// readOnlyTools are the native tools that still run after a refused submit_review in the same response.
+var readOnlyTools = []string{"read_file", "view_image", "list_files", "search_text"}
+
 // ToolNames are the native tools the reviewer is given (besides submit_review).
 var ToolNames = []string{"read_file", "view_image", "list_files", "search_text", "write_file", "shell"}
 
@@ -792,8 +795,11 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				return Verdict{}, err
 			}
 			switch {
-			case verdict != nil || problems != nil:
+			case verdict != nil:
 				outs = append(outs, call.Output("ignored: the review already has a verdict"))
+			case problems != nil && !slices.Contains(readOnlyTools, call.Name):
+				// No verdict exists after a refusal: only reads run, any other call is made again.
+				outs = append(outs, call.Output("not run: the submission was refused; make this call again in the next response"))
 			case call.Name == SubmitReviewTool:
 				v, probs, err := r.validate(call.Args(), input)
 				if err != nil {

@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -468,4 +469,127 @@ func TestAccountSessionSurvivesTheRetryAndRepairReconstructions(t *testing.T) {
 	eq(t, "review-account repair tree changed", *res.Account.Effect.TreeChanged, true)
 	eq(t, "review-account repair final tree", res.Account.Effect.FinalTree, otherTree)
 	deepEq(t, "review-account repair lines", []int{*res.Account.Effect.FilesChanged, *res.Account.Effect.LinesAdded, *res.Account.Effect.LinesDeleted}, []int{1, 1, 1})
+}
+
+// readsEnv is a fake Env whose Unread reports part "a" until a read_file output of app.txt (it
+// contains "candidate") is in the conversation it is given.
+type readsEnv struct{ *fakeEnv }
+
+func (h *readsEnv) Unread(input []any) ([]string, error) {
+	for _, item := range input {
+		m, _ := item.(map[string]any)
+		if out, _ := m["output"].(string); m["type"] == "function_call_output" && strings.Contains(out, "candidate") {
+			return nil, nil
+		}
+	}
+	return []string{"a"}, nil
+}
+
+// batch is one model answer with several tool calls, call i having the id "call-<i>".
+func batch(calls ...[2]string) *provider.Response {
+	var items []map[string]any
+	for i, c := range calls {
+		items = append(items, map[string]any{
+			"type": "function_call", "call_id": "call-" + itoa(i+1), "name": c[0], "arguments": c[1],
+		})
+	}
+	return &provider.Response{Items: items, Usage: provider.Usage{Input: 10, Output: 2}}
+}
+
+// outputsOf are the outputs of the tool calls "call-1", "call-2", ... a request's input answers.
+func outputsOf(r review.Request) []string {
+	var outs []string
+	for _, item := range r.Input {
+		m, _ := item.(map[string]any)
+		if m["type"] == "function_call_output" {
+			out, _ := m["output"].(string)
+			outs = append(outs, out)
+		}
+	}
+	return outs
+}
+
+// TestCallsAfterASubmissionAreAnsweredByItsOutcome pins how the calls that follow a submit_review
+// call in the same response are answered (item submit-then-calls): after a refused submission the
+// read-only calls run and their outputs follow the refusal, any other call is answered "not run"
+// and does nothing, the refusal is accounted once and the reads count as progress on unread parts
+// in the next turn; after an accepted verdict every later call is ignored.
+func TestCallsAfterASubmissionAreAnsweredByItsOutcome(t *testing.T) {
+	t.Parallel()
+	const approve = `{"verdict":"approve","findings":[]}`
+	const notRun = "not run: the submission was refused; make this call again in the next response"
+	const unreadRefusal = "invalid verdict:\nRead all pinned source evidence before approving: 1 unread part(s); use read_file on a"
+
+	in, base := newReview(t)
+	h := &readsEnv{base}
+	base.answers = []*provider.Response{
+		batch(
+			[2]string{"submit_review", approve},
+			[2]string{"read_file", `{"path":"app.txt"}`},
+			[2]string{"list_files", `{}`},
+			[2]string{"write_file", `{"path":"app.txt","content":"x\n"}`},
+			[2]string{"shell", `{"command":"echo x"}`},
+			[2]string{"submit_review", approve},
+			[2]string{"no_such_tool", `{}`},
+		),
+		submitReview(approve),
+	}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "submit-then-calls requests", len(base.requests), 2)
+	eq(t, "submit-then-calls verdict", res.Record.Verdict, "approve")
+	deepEq(t, "submit-then-calls outputs", outputsOf(base.requests[1]), []string{
+		unreadRefusal, "1\tcandidate", ".gitignore\n.kogen/intents/fixture/acceptance.feature\napp.txt\ndeleted.txt", notRun, notRun, notRun, notRun,
+	})
+	text, err := os.ReadFile(filepath.Join(in.Candidate.Root, "app.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "submit-then-calls app.txt", string(text), "candidate\n")
+	var ran []any
+	for _, e := range eventsNamed(t, base, "review_tool_call") {
+		ran = append(ran, e["name"])
+	}
+	deepEq(t, "submit-then-calls tools that ran", ran, []any{"read_file", "list_files"})
+	s, err := review.DecodeSession(base.saves[len(base.saves)-1].Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "submit-then-calls probes", len(s.Probes)+len(s.ProbeRuns), 0)
+	spent := eventsNamed(t, base, "review_allowance")
+	eq(t, "submit-then-calls allowance events", len(spent), 1)
+	eq(t, "submit-then-calls allowance why", spent[0]["why"], any("rejected_verdict"))
+	eq(t, "submit-then-calls rejected verdicts", s.Rejected, 1)
+
+	// After an accepted verdict every later call is ignored and none runs.
+	in, base = newReview(t)
+	h = &readsEnv{base}
+	base.answers = []*provider.Response{
+		batch([2]string{"read_file", `{"path":"app.txt"}`}),
+		batch(
+			[2]string{"submit_review", approve},
+			[2]string{"read_file", `{"path":"app.txt"}`},
+			[2]string{"shell", `{"command":"echo x"}`},
+			[2]string{"submit_review", approve},
+		),
+	}
+	res, err = review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "submit-then-calls accepted verdict", res.Record.Verdict, "approve")
+	var last []any
+	s, err = review.DecodeSession(base.saves[len(base.saves)-1].Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range s.Input[len(s.Input)-4:] {
+		m, _ := item.(map[string]any)
+		last = append(last, m["output"])
+	}
+	const ignored = "ignored: the review already has a verdict"
+	deepEq(t, "submit-then-calls ignored outputs", last, []any{"accepted", ignored, ignored, ignored})
+	eq(t, "submit-then-calls ignored probes", len(s.Probes), 0)
 }
