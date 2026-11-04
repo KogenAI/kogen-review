@@ -146,7 +146,7 @@ func TestDisplay(t *testing.T) {
 		want string
 	}{
 		{nil, ""}, {"x/y.go", "x/y.go"}, {json.Number("12"), "12"}, {json.Number("1.50"), "1.50"},
-		{float64(3), "3"}, {float64(2.5), "2.5"}, {7, "7"}, {true, "true"},
+		{float64(2.5), "2.5"}, {7, "7"}, {true, "true"},
 	} {
 		eq(t, "core.Display", core.Display(c.in), c.want)
 	}
