@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/KogenAI/kogen-coordinator/project"
@@ -151,6 +152,11 @@ type Session struct {
 	// count as unread.
 	Windows     []Window `json:"windows,omitempty"`
 	ResetUnread []string `json:"reset_unread,omitempty"`
+	// Blockers are the blocking findings of every valid verdict this review submitted
+	// (<path>:<line>: <message>), each verdict once, and WallMS the wall time of the calls that
+	// ran it up to this checkpoint: the review's account (account.go) sums them over a resume.
+	Blockers []string `json:"blockers,omitempty"`
+	WallMS   int64    `json:"wall_ms,omitempty"`
 }
 
 // Encode is the JSON a checkpoint keeps of the session.
@@ -201,6 +207,12 @@ type run struct {
 	base *verify.Pass
 	// invalid is set when the review ended without a valid verdict.
 	invalid *Invalid
+	// began is when the call that runs the review started and wallBase the wall time of the
+	// calls before it (a resumed checkpoint's); first is the tree of the green pass the review
+	// started from. They only feed the account and the checkpoints' wall time.
+	began    time.Time
+	wallBase int64
+	first    string
 }
 
 func reviewTools(t *tools.Tools) []any {
@@ -208,7 +220,9 @@ func reviewTools(t *tools.Tools) []any {
 }
 
 // Review starts the review of a green pass (REV-1): the material and the conversation.
-func (Independent) Review(ctx context.Context, in Input, env Env) (Result, error) {
+func (Independent) Review(ctx context.Context, in Input, env Env) (res Result, err error) {
+	r := &run{in: in, env: env, began: time.Now(), first: in.Evidence.Pass.Tree, sess: Session{Usage: core.ZeroTokens()}}
+	defer func() { res.Account = r.account(res, err) }()
 	env.Progress(fmt.Sprintf("kogen: reviewing (review %d)", in.Number))
 	role := in.Intent.Role
 	pass := in.Evidence.Pass
@@ -235,14 +249,15 @@ func (Independent) Review(ctx context.Context, in Input, env Env) (Result, error
 		return Result{}, err
 	}
 	base := pass
-	r := &run{in: in, env: env, pass: pass, base: &base, tools: tools, nativeTools: nativeTools, sess: Session{Role: role, Input: input, Usage: core.ZeroTokens(), Seen: pass.Tree}}
+	r.pass, r.base, r.tools, r.nativeTools = pass, &base, tools, nativeTools
+	r.sess = Session{Role: role, Input: input, Usage: core.ZeroTokens(), Seen: pass.Tree}
 	return r.loop(ctx, nil, "")
 }
 
 // Resume continues a saved review (LOOP-10): a request that was interrupted is sent again
 // with the saved conversation; a verdict whose verification was interrupted is judged
 // again; a blocked review (verdict changes) is reopened, not replayed.
-func (Independent) Resume(ctx context.Context, in Input, env Env) (Result, error) {
+func (Independent) Resume(ctx context.Context, in Input, env Env) (res Result, err error) {
 	c := in.Checkpoint
 	if c == nil {
 		return Result{}, core.ResumeRefused("the saved review state cannot be read")
@@ -256,11 +271,16 @@ func (Independent) Resume(ctx context.Context, in Input, env Env) (Result, error
 	if len(sess.Tools) > 0 {
 		tools = sess.Tools
 	}
-	r := &run{in: in, env: env, pass: *c.Pass, base: nativeResumeBase(*c, sess), sess: sess, tools: tools, nativeTools: nativeTools}
+	r := &run{in: in, env: env, pass: *c.Pass, base: nativeResumeBase(*c, sess), sess: sess, tools: tools, nativeTools: nativeTools,
+		began: time.Now(), wallBase: sess.WallMS, first: c.Pass.Tree}
+	if c.Base != nil {
+		r.first = c.Base.Tree
+	}
 	verdicts := c.Stage != route.StageReview
 	if verdicts && (sess.Verdict == nil || sess.Tree == "") {
 		return Result{}, core.ResumeRefused("the saved review state has no verdict")
 	}
+	defer func() { res.Account = r.account(res, err) }()
 	switch {
 	case c.Stage == route.StageReviewRetry:
 		return r.retry(ctx)
@@ -301,6 +321,9 @@ func nativeResumeBase(c Checkpoint, sess Session) *verify.Pass {
 
 // save checkpoints the review at stage.
 func (r *run) save(stage string) error {
+	if !r.began.IsZero() {
+		r.sess.WallMS = r.wallMS()
+	}
 	raw, err := r.sess.Encode()
 	if err != nil {
 		return err
@@ -384,7 +407,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	r.pass = pass
 	r.sess = Session{
 		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
-		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
+		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
@@ -443,6 +466,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	env := r.env
 	n := r.in.Number
 	r.sess.Verdict, r.sess.Tree = &verdict, tree
+	r.sess.Blockers = append(r.sess.Blockers, blockerLines(verdict.Findings)...)
 	if err := r.save(route.StageReviewVerify); err != nil {
 		return Result{}, false, err
 	}
@@ -477,10 +501,8 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	if verdict.Verdict == "changes" {
 		e := sys.Fail("candidate", "review_blocked",
 			"the reviewer could not resolve a substantive blocker within the approved Intent; edits are left in place", 1)
-		for _, f := range findings {
-			if f["severity"] == "blocking" {
-				e.Lines = append(e.Lines, fmt.Sprintf("review: %s:%s: %s", core.Display(f["path"]), core.Display(f["line"]), core.Display(f["message"])))
-			}
+		for _, line := range blockerLines(findings) {
+			e.Lines = append(e.Lines, "review: "+line)
 		}
 		return Result{Record: review, Pass: r.pass, Repairs: r.sess.RepairRounds, Environment: r.environment()}, false, e
 	}
@@ -564,7 +586,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	r.pass = final
 	r.sess = Session{
 		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
-		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
+		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	if err := r.save(route.StageReview); err != nil {

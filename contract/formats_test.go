@@ -77,6 +77,19 @@ func TestSessionEncodesItsCheckpointBytes(t *testing.T) {
 	}
 	eq(t, "session-json full", string(raw), sessionJSON)
 
+	// The account's two keys follow reset_unread (item account-session); a session without them
+	// encodes the bytes above.
+	counted := fullSession()
+	counted.ResetUnread = []string{"src/part-3.txt"}
+	counted.Blockers = []string{"app.txt:3: m"}
+	counted.WallMS = 1234
+	raw, err = counted.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "account-session bytes", string(raw), strings.TrimSuffix(sessionJSON, "}")+
+		`,"reset_unread":["src/part-3.txt"],"blockers":["app.txt:3: m"],"wall_ms":1234}`)
+
 	// A session of the stage review: no verdict yet, and nil lists encoded as [].
 	raw, err = review.Session{Role: project.Role{Model: "m"}, Usage: core.ZeroTokens(),
 		Verdict: &review.Verdict{Verdict: "approve"}}.Encode()
@@ -101,6 +114,14 @@ func TestDecodeSessionReadsWhatACheckpointKept(t *testing.T) {
 		t.Errorf("session-decode: got %#v, want %#v", s, fullSession())
 	}
 	eq(t, "session-decode verdict", s.Verdict.Verdict, "changes")
+	counted, err := review.DecodeSession(json.RawMessage(strings.TrimSuffix(sessionJSON, "}") + `,"blockers":["app.txt:3: m"],"wall_ms":1234}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "account-session blockers", counted.Blockers, []string{"app.txt:3: m"})
+	eq(t, "account-session wall_ms", counted.WallMS, int64(1234))
+	deepEq(t, "account-session absent", s.Blockers, []string(nil))
+	eq(t, "account-session absent wall_ms", s.WallMS, int64(0))
 	legacy, err := review.DecodeSession(json.RawMessage(strings.Replace(sessionJSON, `"requests":13,`, "", 1)))
 	if err != nil {
 		t.Fatal(err)

@@ -49,6 +49,10 @@ type Input struct {
 	Executor *core.ExecutorState
 	// Run is where the review's private evidence goes: the run folder and its id.
 	Run Run
+	// Attempt is what the candidate's attempt used before this review, the builder's requests,
+	// tokens and wall time, as the caller counts them. Its zero value (nil counts) means the
+	// caller gave none.
+	Attempt Spend
 }
 
 // Candidate is the saved candidate a review judges: the checkout holding it and that checkout's
@@ -175,6 +179,50 @@ type Result struct {
 	Invalid *Invalid
 	// Environment is set when the review ran under a Restriction: nil otherwise.
 	Environment *Environment
+	// Account is the review's cost and effect record: set on every result of Independent.Review,
+	// Independent.Resume and External.Review, including one that stops on an error. It stays nil
+	// when Independent.Resume refuses a saved state it cannot use, and for External.Resume.
+	Account *Account
+}
+
+// Spend is what a review, or a whole attempt, used.
+type Spend struct {
+	Requests int   `json:"requests"`
+	Input    *int  `json:"input"`  // nil: unknown
+	Cached   *int  `json:"cached"` // nil: unknown
+	Output   *int  `json:"output"` // nil: unknown
+	WallMS   int64 `json:"wall_ms"`
+}
+
+// Share is a review's share of its attempt, per figure: review / attempt (nil: not computable).
+type Share struct {
+	Requests *float64 `json:"requests"`
+	Input    *float64 `json:"input"`
+	Cached   *float64 `json:"cached"`
+	Output   *float64 `json:"output"`
+	WallMS   *float64 `json:"wall_ms"`
+}
+
+// Effect is what a review changed, as plain facts.
+type Effect struct {
+	FirstTree      string   `json:"first_tree"`
+	FinalTree      string   `json:"final_tree"`
+	TreeChanged    *bool    `json:"tree_changed"`
+	FilesChanged   *int     `json:"files_changed"`
+	LinesAdded     *int     `json:"lines_added"`
+	LinesDeleted   *int     `json:"lines_deleted"`
+	Blockers       int      `json:"blockers"`
+	Defects        []string `json:"defects"` // [] when none, never null
+	FirstTreeGreen bool     `json:"first_tree_green"`
+}
+
+// Account is a review's cost and effect record.
+type Account struct {
+	Review       Spend  `json:"review"`
+	Attempt      Spend  `json:"attempt"`
+	Share        Share  `json:"share"`
+	RepairRounds int    `json:"repair_rounds"`
+	Effect       Effect `json:"effect"`
 }
 
 // Invalid is what a review that ended without a valid verdict leaves for its caller: the

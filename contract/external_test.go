@@ -22,12 +22,24 @@ import (
 func TestExternalReviewApprovesInItsOwnSession(t *testing.T) {
 	t.Parallel()
 	in, h := newReview(t)
-	x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(`{"verdict":"approve","findings":[]}`)}}
+	round := structured(`{"verdict":"approve","findings":[]}`)
+	round.Usage = executor.Usage{Input: core.Count(1500), Cached: core.Count(500), Output: core.Count(150), State: executor.UsageComplete}
+	x := &fakeExecutor{t: t, results: []executor.RoundResult{round}}
+	// The Build's executor state already holds earlier usage: the account counts only this round.
+	in.Executor = &core.ExecutorState{Name: "fixture-executor", SessionID: "earlier", Rounds: 3,
+		Usage: core.ExecutorUsage{Input: core.Count(7000), Cached: core.Count(2000), Output: core.Count(700), Reasoning: core.Count(0), State: executor.UsageComplete}}
 	r := review.NewExternal(x, externalDescriptor(), 4)
 	ap, err := r.Review(context.Background(), in, h)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ap.Account == nil {
+		t.Fatal("review-account: the external approval has no Account")
+	}
+	eq(t, "review-account requests", ap.Account.Review.Requests, 1)
+	deepEq(t, "review-account tokens", []*int{ap.Account.Review.Input, ap.Account.Review.Cached, ap.Account.Review.Output}, []*int{core.Count(1500), core.Count(500), core.Count(150)})
+	eq(t, "review-account repair rounds", ap.Account.RepairRounds, 0)
+	eq(t, "review-account first tree green", ap.Account.Effect.FirstTreeGreen, true)
 	eq(t, "external-approve verdict", ap.Record.Verdict, "approve")
 	eq(t, "external-approve pass", ap.Pass.Tree, greenTree)
 	eq(t, "external-approve sessions", x.starts, 1)

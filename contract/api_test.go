@@ -57,6 +57,7 @@ var (
 		Role: project.Role{}, Input: []any{}, Usage: core.Tokens{}, Attempts: []review.Submitted{},
 		Verdict: &review.Verdict{}, Tree: "", Tools: []any{},
 		Windows: []review.Window{{File: "", SHA256: ""}}, ResetUnread: []string{},
+		Blockers: []string{}, WallMS: 0,
 	}
 	_ = review.Submitted{Pass: 0, Tree: "", Verdict: "", Findings: []map[string]any{}}
 	_ = review.Verdict{Verdict: "", Findings: []map[string]any{}}
@@ -81,8 +82,18 @@ var (
 		},
 		Checkpoint: &review.Checkpoint{Stage: "", Pass: &verify.Pass{}, Base: &verify.Pass{}, Session: json.RawMessage{}},
 		Number:     0, Last: &core.ReviewRecord{}, Executor: &core.ExecutorState{}, Run: review.Run{ID: "", Dir: ""},
+		Attempt: review.Spend{Requests: 0, Input: nil, Cached: nil, Output: nil, WallMS: 0},
 	}
-	_ = review.Result{Record: core.ReviewRecord{}, Pass: verify.Pass{}, Repairs: 0, Invalid: &review.Invalid{}, Environment: &review.Environment{}}
+	_ = review.Result{Record: core.ReviewRecord{}, Pass: verify.Pass{}, Repairs: 0, Invalid: &review.Invalid{}, Environment: &review.Environment{}, Account: &review.Account{}}
+	// The review's cost and effect record (item review-account).
+	_ = review.Account{
+		Review:       review.Spend{Requests: 0, Input: new(int), Cached: new(int), Output: new(int), WallMS: int64(0)},
+		Attempt:      review.Spend{},
+		Share:        review.Share{Requests: new(float64), Input: new(float64), Cached: new(float64), Output: new(float64), WallMS: new(float64)},
+		RepairRounds: 0,
+		Effect: review.Effect{FirstTree: "", FinalTree: "", TreeChanged: new(bool), FilesChanged: new(int), LinesAdded: new(int),
+			LinesDeleted: new(int), Blockers: 0, Defects: []string{}, FirstTreeGreen: false},
+	}
 	_ = review.Environment{ReviewerRestricted: false, OuterGatesRestricted: false, Restriction: "", Limitations: []review.Limitation{{Check: "", Refused: []string{}}}}
 	_ = review.ProbeRun{Command: "", Status: nil, Tree: "", Refused: []string{}}
 	_ = review.Invalid{Review: 0, ForcedRoute: "", ForcedModel: "", Reason: "", Problems: []string{}, RejectedVerdict: 0,

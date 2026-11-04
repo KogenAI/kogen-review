@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-coordinator/route"
@@ -98,6 +99,14 @@ type xreview struct {
 	in       Input
 	env      Env
 	executor *core.ExecutorState
+	// The review's own account (account.go): when it began, the executor rounds it ran and their
+	// usage (never the executor state's running totals, which hold earlier sessions), its repair
+	// rounds and the blockers its sessions raised.
+	began   time.Time
+	rounds  int
+	usage   core.Tokens
+	repairs int
+	defects []string
 }
 
 // executorChanged hands the caller the reviewer's executor state as it is now.
@@ -106,8 +115,9 @@ func (v *xreview) executorChanged() {
 	v.env.Executor(&x)
 }
 
-func (x External) Review(ctx context.Context, in Input, env Env) (Result, error) {
-	v := &xreview{in: in, env: env, executor: in.Executor}
+func (x External) Review(ctx context.Context, in Input, env Env) (res Result, err error) {
+	v := &xreview{in: in, env: env, executor: in.Executor, began: time.Now(), usage: core.ZeroTokens()}
+	defer func() { res.Account = v.account(res, err) }()
 	pass := in.Evidence.Pass
 	role := in.Intent.Role
 	m, err := MaterialOf(in)
@@ -308,7 +318,7 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 
 	base := s.base
 	r := &run{in: in, env: env, pass: s.pass, external: true, base: &base, sess: Session{Role: role, Usage: core.ZeroTokens(), Seen: s.pass.Tree, RepairRounds: s.repairRounds}}
-	feedback, invalid := "", 0
+	feedback, invalid, taken := "", 0, 0
 	for round := 1; ; round++ {
 		if round > x.maxRounds {
 			return Result{}, executor.RoundLimit(x.maxRounds)
@@ -322,10 +332,12 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 		if err := env.Facts("reviewing"); err != nil {
 			return Result{}, err
 		}
+		v.rounds++
 		res, err := in.Tools.Round(ctx, sess, executor.Input{Feedback: feedback})
 		if err != nil {
 			return Result{}, err
 		}
+		v.usage = v.usage.Plus(tokensOf(res.Usage))
 		if res.Ending != executor.EndFinish && res.Ending != executor.EndNoCall {
 			return Result{}, executor.Fail(executor.ReasonProtocol, "executor "+x.desc.Name+" returned the unknown round ending "+core.InspectString(string(res.Ending)))
 		}
@@ -393,6 +405,8 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 			return Result{}, err
 		}
 		approved, again, err := r.evaluate(ctx, *verdict, tree)
+		v.defects = append(v.defects, r.sess.Blockers[taken:]...)
+		taken, v.repairs = len(r.sess.Blockers), r.sess.RepairRounds
 		if err != nil || !again {
 			return approved, err
 		}

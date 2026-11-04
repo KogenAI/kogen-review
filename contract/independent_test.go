@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -45,6 +46,22 @@ func TestIndependentReviewApprovesTheGreenPass(t *testing.T) {
 	eq(t, "independent-approve record n", ap.Record.N, 1)
 	eq(t, "independent-approve record tree", ap.Record.Tree, greenTree)
 	eq(t, "independent-approve repairs", ap.Repairs, 0)
+	acct := ap.Account
+	if acct == nil {
+		t.Fatal("review-account: the approval has no Account")
+	}
+	eq(t, "review-account requests", acct.Review.Requests, 1)
+	deepEq(t, "review-account tokens", []*int{acct.Review.Input, acct.Review.Cached, acct.Review.Output}, []*int{core.Count(10), core.Count(0), core.Count(2)})
+	eq(t, "review-account repair rounds", acct.RepairRounds, 0)
+	eq(t, "review-account first tree", acct.Effect.FirstTree, greenTree)
+	eq(t, "review-account final tree", acct.Effect.FinalTree, greenTree)
+	eq(t, "review-account tree changed", *acct.Effect.TreeChanged, false)
+	deepEq(t, "review-account lines", []int{*acct.Effect.FilesChanged, *acct.Effect.LinesAdded, *acct.Effect.LinesDeleted}, []int{0, 0, 0})
+	eq(t, "review-account blockers", acct.Effect.Blockers, 0)
+	deepEq(t, "review-account defects", acct.Effect.Defects, []string{})
+	eq(t, "review-account first tree green", acct.Effect.FirstTreeGreen, true)
+	// Input.Attempt is zero here: the attempt's counts and token totals are the review's or unknown.
+	deepEq(t, "review-account attempt", acct.Attempt, review.Spend{Requests: 1, WallMS: acct.Review.WallMS})
 	deepEq(t, "independent-approve last review", *h.last, ap.Record)
 
 	eq(t, "independent-approve requests", len(h.requests), 1)
@@ -103,6 +120,15 @@ func TestIndependentReviewChangesIsTheReviewBlockedStop(t *testing.T) {
 	}
 	eq(t, "independent-blocked session verdict", s.Verdict.Verdict, "changes")
 	eq(t, "independent-blocked session tree", s.Tree, greenTree)
+	deepEq(t, "review-account session blockers", s.Blockers, []string{"app.txt:2: wrong"})
+	acct := res.Account
+	if acct == nil {
+		t.Fatal("review-account: the blocked review has no Account")
+	}
+	eq(t, "review-account blocked requests", acct.Review.Requests, 1)
+	eq(t, "review-account blockers", acct.Effect.Blockers, 1)
+	deepEq(t, "review-account defects", acct.Effect.Defects, []string{"app.txt:2: wrong"})
+	eq(t, "review-account first tree green", acct.Effect.FirstTreeGreen, false)
 }
 
 // TestIndependentReviewWithoutAVerdictIsHandedToTheBuild pins the end of a review without a
@@ -158,8 +184,11 @@ func TestIndependentResumeJudgesTheSavedVerdict(t *testing.T) {
 
 	in2, h2 := newReview(t)
 	in2.Checkpoint = &review.Checkpoint{Stage: route.StageReview, Pass: &pass, Session: []byte(`{"attempts":"no"}`)}
-	_, err = review.Independent{}.Resume(context.Background(), in2, h2)
+	refused, err := review.Independent{}.Resume(context.Background(), in2, h2)
 	wantError(t, "independent-resume refused", err, "candidate", "resume_refused")
+	if refused.Account != nil {
+		t.Errorf("review-account: a refused resume has an Account: %+v", refused.Account)
+	}
 }
 
 // TestIndependentApprovalOfAnUnverifiedTreeIsVerifiedFirst pins the exact-tree rule: an approval
@@ -364,4 +393,79 @@ func TestThirdRequestSequence(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestAccountSessionSurvivesTheRetryAndRepairReconstructions pins that the session's blockers
+// and wall_ms travel through the session a retry reopens and the one a repair round rebuilds,
+// that a resume adds its own elapsed time to the checkpoint's, and that a blocker raised before
+// the resume is counted once in the account (items account-session, review-account).
+func TestAccountSessionSurvivesTheRetryAndRepairReconstructions(t *testing.T) {
+	t.Parallel()
+	defect := "app.txt:1: m"
+	blocked := review.Verdict{Verdict: "changes", Findings: []map[string]any{{"path": "app.txt", "line": 1, "severity": "blocking", "message": "m"}}}
+	pass := greenPass()
+
+	// The retry of a blocked review.
+	in, h := newReview(t)
+	raw, err := review.Session{Role: reviewRole, Usage: core.ZeroTokens(), Input: []any{map[string]any{"role": "user", "content": "prior"}},
+		Seen: greenTree, Tree: greenTree, Verdict: &blocked, Requests: 2, Blockers: []string{defect}, WallMS: 500}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Checkpoint = &review.Checkpoint{Stage: route.StageReviewVerify, Pass: &pass, Base: &pass, Session: raw}
+	h.verifies = []verify.Pass{{N: 2, Tree: greenTree, Green: true}}
+	h.answers = []*provider.Response{submitReview(`{"verdict":"approve","findings":[]}`)}
+	res, err := review.Independent{}.Resume(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, save := range h.saves {
+		s, err := review.DecodeSession(save.Session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deepEq(t, fmt.Sprintf("account-session retry save %d blockers", i), s.Blockers, []string{defect})
+		if s.WallMS < 500 {
+			t.Errorf("account-session retry save %d: wall_ms %d, want at least the checkpoint's 500", i, s.WallMS)
+		}
+	}
+	acct := res.Account
+	if acct == nil {
+		t.Fatal("review-account: the resumed review has no Account")
+	}
+	deepEq(t, "review-account resumed defects", acct.Effect.Defects, []string{defect})
+	eq(t, "review-account resumed blockers", acct.Effect.Blockers, 1)
+	eq(t, "review-account resumed requests", acct.Review.Requests, 3)
+	eq(t, "review-account resumed first tree green", acct.Effect.FirstTreeGreen, false)
+	if acct.Review.WallMS < 500 {
+		t.Errorf("review-account resumed wall: %d ms, want at least the checkpoint's 500", acct.Review.WallMS)
+	}
+
+	// A repair round: the approval of a tree the reviewer was not given.
+	in, h = newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+	raw, err = review.Session{Role: reviewRole, Usage: core.ZeroTokens(), Seen: greenTree, Blockers: []string{defect}, WallMS: 500}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Checkpoint = &review.Checkpoint{Stage: route.StageReview, Pass: &pass, Session: raw}
+	h.answers = []*provider.Response{submitReview(`{"verdict":"approve","findings":[]}`), submitReview(`{"verdict":"approve","findings":[]}`)}
+	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
+	res, err = review.Independent{}.Resume(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := h.saves[len(h.saves)-1]
+	s, err := review.DecodeSession(last.Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "account-session repair blockers", s.Blockers, []string{defect})
+	if s.WallMS < 500 {
+		t.Errorf("account-session repair: wall_ms %d, want at least the checkpoint's 500", s.WallMS)
+	}
+	eq(t, "review-account repair rounds", res.Account.RepairRounds, 1)
+	eq(t, "review-account repair tree changed", *res.Account.Effect.TreeChanged, true)
+	eq(t, "review-account repair final tree", res.Account.Effect.FinalTree, otherTree)
+	deepEq(t, "review-account repair lines", []int{*res.Account.Effect.FilesChanged, *res.Account.Effect.LinesAdded, *res.Account.Effect.LinesDeleted}, []int{1, 1, 1})
 }
