@@ -3,6 +3,8 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -54,18 +56,39 @@ func TestValidateAcceptsTheVerdictShapes(t *testing.T) {
 		{`{"verdict":"approve","findings":[{"path":"app.txt","line":1.5,"severity":"note","message":"PRIVATE_REVIEW_MARKER"}]}`, false, "each finding needs path (string), line (integer), severity (blocking or note) and message"},
 		{`{"verdict":"approve","findings":[{"path":"missing.txt","line":1,"severity":"note","message":"m"}]}`, false, "missing.txt is not a file of the repository"},
 		{`{"verdict":"approve","findings":[{"path":"deleted.txt","line":1,"severity":"note","message":"m"}]}`, true, ""},
+		{`{"verdict":"approve","findings":[{"path":"dir/../app.txt","line":1,"severity":"note","message":"m"}]}`, true, ""},
+		{`{"verdict":"approve","findings":[{"path":"./app.txt","line":1,"severity":"note","message":"m"}]}`, true, ""},
+		{`{"verdict":"changes","findings":[{"path":"../outside.txt","line":1,"severity":"blocking","message":"m"}]}`, false, "../outside.txt is not a file of the repository"},
+		{`{"verdict":"changes","findings":[{"path":"dir/../../outside.txt","line":1,"severity":"blocking","message":"m"}]}`, false, "dir/../../outside.txt is not a file of the repository"},
+		{`{"verdict":"changes","findings":[{"path":"$OUTSIDE","line":1,"severity":"blocking","message":"m"}]}`, false, "$OUTSIDE is not a file of the repository"},
+		{`{"verdict":"changes","findings":[{"path":"link.txt","line":1,"severity":"blocking","message":"m"}]}`, false, "link.txt is not a file of the repository"},
 	} {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			t.Parallel()
 			in, h := newReview(t)
-			verdict, problems, err := review.Validate(in, h, decodeArgs(t, tc.args), nil)
+			// A regular file next to the checkout root, and an untracked link to it inside.
+			outside := filepath.Join(filepath.Dir(in.Candidate.Root), "outside.txt")
+			writeFile(t, outside, "OUTSIDE-CONTENT-5c1e\n")
+			if err := os.Symlink("../outside.txt", filepath.Join(in.Candidate.Root, "link.txt")); err != nil {
+				t.Fatal(err)
+			}
+			args, problem := strings.ReplaceAll(tc.args, "$OUTSIDE", outside), strings.ReplaceAll(tc.problem, "$OUTSIDE", outside)
+			verdict, problems, err := review.Validate(in, h, decodeArgs(t, args), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			eq(t, "validate-shape accepted "+tc.args, verdict != nil, tc.accepted)
-			eq(t, "validate-shape problem "+tc.args, strings.Join(problems, "; "), tc.problem)
-			if strings.Contains(strings.Join(problems, ""), "PRIVATE_REVIEW_MARKER") {
+			eq(t, "validate-shape accepted "+args, verdict != nil, tc.accepted)
+			eq(t, "validate-shape problem "+args, strings.Join(problems, "; "), problem)
+			if strings.Contains(strings.Join(problems, ""), "PRIVATE_REVIEW_MARKER") || strings.Contains(strings.Join(problems, ""), "OUTSIDE-CONTENT") {
 				t.Error("validate-shape: a submitted value was disclosed")
+			}
+			if verdict != nil && len(verdict.Findings) == 1 {
+				// An accepted path is recorded clean.
+				want := "app.txt"
+				if strings.Contains(args, "deleted.txt") {
+					want = "deleted.txt"
+				}
+				eq(t, "validate-shape recorded path "+args, fmt.Sprint(verdict.Findings[0]["path"]), want)
 			}
 		})
 	}

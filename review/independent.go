@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -919,8 +920,8 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 }
 
 // validate checks a submit_review call (REV-4): a verdict approve or changes with findings
-// {path, line, severity, message}; every path names a file of the checkout or of the start
-// HEAD; changes has a blocking finding, approve none; and an approval has read all pinned source
+// {path, line, severity, message}; every path names a file inside the checkout root or of the
+// start HEAD and is recorded clean; changes has a blocking finding, approve none; and an approval has read all pinned source
 // parts. It returns the verdict, or the problems to send back.
 func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, error) {
 	verdict, _ := args["verdict"].(string)
@@ -976,13 +977,14 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 			problems = append(problems, "each finding needs path (string), line (integer), severity (blocking or note) and message")
 			continue
 		}
-		findings = append(findings, f)
-		if st, err := os.Stat(filepath.Join(r.in.Candidate.Root, path)); err == nil && st.Mode().IsRegular() {
+		clean, ok := r.findingPath(path)
+		if !ok {
+			problems = append(problems, path+" is not a file of the repository")
 			continue
 		}
-		if !inStart(r.in.Candidate, path) {
-			problems = append(problems, path+" is not a file of the repository")
-		}
+		recorded := maps.Clone(f)
+		recorded["path"] = clean
+		findings = append(findings, recorded)
 	}
 	switch {
 	case verdict == "changes" && blocking == 0:
@@ -1019,6 +1021,39 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 		return nil, problems, nil
 	}
 	return &Verdict{Verdict: verdict, Findings: findings, Requirements: requirements}, nil, nil
+}
+
+// findingPath reports the clean slash form of a finding's path when it names a file inside the
+// checkout root or a file of the start commit. A path that is absolute, climbs out of the root or
+// resolves through a link outside it is refused without opening the file.
+func (r *run) findingPath(path string) (string, bool) {
+	if filepath.IsAbs(path) {
+		return "", false
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	root := r.in.Candidate.Root
+	full := filepath.Join(root, filepath.FromSlash(clean))
+	if _, err := os.Lstat(full); err == nil {
+		resolved, err := filepath.EvalSymlinks(full)
+		if err != nil {
+			return "", false
+		}
+		resolvedRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			return "", false
+		}
+		rel, err := filepath.Rel(resolvedRoot, resolved)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		if st, err := os.Stat(resolved); err == nil && st.Mode().IsRegular() {
+			return clean, true
+		}
+	}
+	return clean, inStart(r.in.Candidate, clean)
 }
 
 // requirementSuffix ends the problems of evidence that cannot be established here.
