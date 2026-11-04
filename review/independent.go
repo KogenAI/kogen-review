@@ -554,7 +554,9 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 			r.sess.FailureIdentities, r.sess.FailureStreak = ids, 1
 		}
 	}
-	if r.sess.FailureStreak >= 3 || r.sess.RepairRounds >= 20 {
+	// The repair stops belong to the native reviewer; an external session is bounded by its
+	// executor round cap alone.
+	if !r.external && (r.sess.FailureStreak >= 3 || r.sess.RepairRounds >= 20) {
 		reason := "repeated identical final failures"
 		if r.sess.FailureStreak < 3 {
 			reason = "repair round hard cap"

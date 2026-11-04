@@ -3,9 +3,9 @@ package contract
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/KogenAI/kogen-coordinator/route"
@@ -21,7 +21,7 @@ func TestExternalRepairBounds(t *testing.T) {
 		name     string
 		count    int
 		changing bool
-	}{{"same", 3, false}, {"cap", 20, true}} {
+	}{{"same", 5, false}, {"cap", 22, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			in, h := newReview(t)
 			x := &fakeExecutor{t: t}
@@ -38,17 +38,37 @@ func TestExternalRepairBounds(t *testing.T) {
 				}
 				h.verifies = append(h.verifies, verify.Pass{N: i + 2, Tree: greenTree, Failing: []string{"check:" + id}})
 			}
-			res, err := review.NewExternal(x, externalDescriptor(), tc.count+1).Review(context.Background(), in, h)
-			e := wantError(t, "external bound", err, "candidate", "review_blocked")
-			eq(t, "rounds", len(x.inputs), tc.count)
-			eq(t, "repairs", res.Repairs, tc.count)
-			eq(t, "recorded repairs", h.repairs, tc.count)
-			if !strings.Contains(e.Detail, fmt.Sprint(tc.count)) {
-				t.Fatal(e.Detail)
+			_, err := review.NewExternal(x, externalDescriptor(), tc.count).Review(context.Background(), in, h)
+			// The session is bounded by its executor round cap alone, not by the repair stops.
+			if want := executor.RoundLimit(tc.count); !errors.Is(err, want) && fmt.Sprint(err) != fmt.Sprint(want) {
+				t.Fatalf("external bound: got %v, want %v", err, want)
 			}
-			eq(t, "record verdict", readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))["verdict"], any("changes"))
+			eq(t, "rounds", len(x.inputs), tc.count)
+			eq(t, "recorded repairs", h.repairs, tc.count)
+			if h.last != nil && h.last.Verdict == "changes" {
+				t.Fatal("a synthetic changes record was sent")
+			}
+			eq(t, "record verdict", readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))["verdict"], any("approve"))
 		})
 	}
+}
+
+// The native reviewer keeps the twenty-round hard cap: changing failures never reach the
+// identical-failure streak, so the hard cap is what ends the review.
+func TestNativeRepairHardCap(t *testing.T) {
+	in, h := newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+	for i := 0; i < 20; i++ {
+		h.answers = append(h.answers, submitReview(`{"verdict":"approve","findings":[]}`))
+		h.verifies = append(h.verifies, verify.Pass{N: i + 2, Tree: greenTree, Failing: []string{fmt.Sprintf("check:item%d", i)}})
+	}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	e := wantError(t, "native hard cap", err, "candidate", "review_blocked")
+	eq(t, "detail", e.Detail, "repair round hard cap after 20 repair rounds; current failing stage/items: check:item19")
+	eq(t, "repairs", res.Repairs, 20)
+	eq(t, "recorded repairs", h.repairs, 20)
+	eq(t, "remaining verifications", len(h.verifies), 0)
+	eq(t, "record verdict", readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))["verdict"], any("changes"))
 }
 
 func TestRetainedRepairCheckpointResumeApproval(t *testing.T) {

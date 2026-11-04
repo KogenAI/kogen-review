@@ -85,4 +85,7 @@ Every exported member of `review` that kogen-build uses (derived with a go/types
 The native session checkpoint optionally retains `repair_rounds`, `failure_identities` (the
 sorted set of stage-qualified final failures), and `failure_streak`. Missing fields default to
 zero for older checkpoints. These values survive retained conversations and blocked-review resume;
-resume's fresh verification does not itself consume a repair round.
+resume's fresh verification does not itself consume a repair round. The repair stops (three
+identical final failures, twenty repair rounds) apply to the native reviewer only: an external
+session counts the same fields for observability and ends at its executor round cap
+(`executor.RoundLimit`, `candidate/executor_round_limit`).
