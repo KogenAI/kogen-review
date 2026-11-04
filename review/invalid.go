@@ -23,14 +23,25 @@ func (r *run) allowance(why string) {
 // candidate/review_invalid. forced: the route was told to call submit_review and did not, which
 // the hand-off names.
 func (r *run) invalidStop(problems []string, reason string, forced bool) error {
-	r.env.Event(map[string]any{
+	event := map[string]any{
 		"event": "review", "review": r.in.Number, "verdict": "invalid", "problems": problems, "reason": reason,
 		"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
-	})
+	}
 	end := &Invalid{
 		Review: r.in.Number, Reason: reason, Problems: problems, RejectedVerdict: r.sess.Rejected, NoToolReminder: r.sess.NoTool,
 		Pass: r.pass, Base: r.base, Reopened: r.sess.Reopened, Repaired: r.sess.Repaired,
 	}
+	if reason == "no_tool_reminder_exhausted" || reason == "no_tool_reminder_cap" {
+		role := core.ProviderRole(r.sess.Role)
+		end.ProseTurns, end.ForcedRequests, end.ForcedAnswered = r.sess.ProseTurns, r.sess.ForcedRequests, r.sess.ForcedAnswered
+		end.Route, end.Model, end.ToolChoice = provider.Name(role), r.sess.Role.Model, "text_fallback"
+		if provider.SupportsToolChoice(role) {
+			end.ToolChoice = "api_forced"
+		}
+		event["prose_turns"], event["forced_requests"], event["forced_answered_with_tool"] = end.ProseTurns, end.ForcedRequests, end.ForcedAnswered
+		event["route"], event["model"], event["tool_choice"] = end.Route, end.Model, end.ToolChoice
+	}
+	r.env.Event(event)
 	if forced {
 		end.ForcedRoute = provider.Name(core.ProviderRole(r.sess.Role))
 		end.ForcedModel = r.sess.Role.Model

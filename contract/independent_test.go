@@ -124,6 +124,12 @@ func TestIndependentReviewWithoutAVerdictIsHandedToTheBuild(t *testing.T) {
 	eq(t, "independent-invalid reason", res.Invalid.Reason, "no_tool_reminder_exhausted")
 	eq(t, "independent-invalid no-tool reminders", res.Invalid.NoToolReminder, 1)
 	eq(t, "independent-invalid pass", res.Invalid.Pass.Tree, greenTree)
+	eq(t, "independent-invalid prose turns", res.Invalid.ProseTurns, 2)
+	eq(t, "independent-invalid forced requests", res.Invalid.ForcedRequests, 1)
+	eq(t, "independent-invalid forced answered", res.Invalid.ForcedAnswered, 0)
+	eq(t, "independent-invalid route", res.Invalid.Route, "chatgpt")
+	eq(t, "independent-invalid model", res.Invalid.Model, "fixture-review-model")
+	eq(t, "independent-invalid tool choice", res.Invalid.ToolChoice, "api_forced")
 	deepEq(t, "independent-invalid record", review.InvalidRecord(1), core.ReviewRecord{N: 1, Verdict: "invalid", Findings: []map[string]any{}})
 }
 
@@ -187,6 +193,40 @@ func TestIndependentApprovalOfAnUnverifiedTreeIsVerifiedFirst(t *testing.T) {
 	if !slices.Contains(h.progress, "kogen: review 1: the candidate changed after its contents were delivered; returning the changes to the reviewer") {
 		t.Errorf("independent-exact-tree progress: %q", h.progress)
 	}
+}
+
+// TestIndependentRepairRoundCarriesTheReminderCount pins that a repair round keeps the
+// reminders and counters of the review (item independent-prose-carry): a prose-only turn after
+// the repair feedback is reminded while under the cap, and the cap counts the reminders of the
+// earlier conversation, so the third prose-only turn after the repair ends the review.
+func TestIndependentRepairRoundCarriesTheReminderCount(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+	h.answers = []*provider.Response{
+		prose("fine"), // reminder 1
+		submitReview(`{"verdict":"approve","findings":[]}`), // an unverified tree: a repair round
+		prose("fine"), // reminder 2
+		readFile("app.txt"),
+		prose("fine"), // reminder 3
+		readFile("app.txt"),
+		prose("fine"), // the cap
+		submitReview(`{"verdict":"approve","findings":[]}`),
+	}
+	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	wantError(t, "independent-prose-carry", err, "candidate", "review_invalid")
+	eq(t, "independent-prose-carry requests", len(h.requests), 7)
+	eq(t, "independent-prose-carry reminder forces submit_review", h.requests[3].ForceTool, review.SubmitReviewTool)
+	if res.Invalid == nil {
+		t.Fatal("independent-prose-carry: the review's Invalid is missing")
+	}
+	eq(t, "independent-prose-carry reason", res.Invalid.Reason, "no_tool_reminder_cap")
+	eq(t, "independent-prose-carry reminders", res.Invalid.NoToolReminder, 3)
+	eq(t, "independent-prose-carry prose turns", res.Invalid.ProseTurns, 4)
+	eq(t, "independent-prose-carry forced requests", res.Invalid.ForcedRequests, 3)
+	eq(t, "independent-prose-carry forced answered", res.Invalid.ForcedAnswered, 3)
+	eq(t, "independent-prose-carry repaired", res.Invalid.Repaired, true)
 }
 
 // shellCall is a model answer calling shell with command.

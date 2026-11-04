@@ -187,7 +187,18 @@ type Invalid struct {
 	Problems        []string
 	RejectedVerdict int
 	NoToolReminder  int
-	Pass            verify.Pass
+	// ProseTurns, ForcedRequests, ForcedAnswered, Route, Model and ToolChoice are the exact cause
+	// of a review that ended because of prose-only turns (no_tool_reminder_exhausted and
+	// no_tool_reminder_cap): the prose-only turns, the answered requests that required
+	// submit_review and those answered with a tool call, and the route, model and tool-choice
+	// mode (api_forced or text_fallback). Zero for any other reason.
+	ProseTurns     int
+	ForcedRequests int
+	ForcedAnswered int
+	Route          string
+	Model          string
+	ToolChoice     string
+	Pass           verify.Pass
 	// Base is the green pass the review session was started from (nil: the caller decides from
 	// Repaired whether the pass under review is it).
 	Base *verify.Pass

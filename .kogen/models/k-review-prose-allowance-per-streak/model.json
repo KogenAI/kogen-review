@@ -1,0 +1,14 @@
+{
+  "None": false,
+  "Path": ".kogen/models/k-review-prose-allowance-per-streak/model.qnt",
+  "Invariants": [
+    "Capped",
+    "Cause",
+    "Counted",
+    "Forced",
+    "Persistent"
+  ],
+  "Seed": "7",
+  "Samples": "1000",
+  "Steps": "30"
+}

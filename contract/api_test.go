@@ -86,7 +86,9 @@ var (
 	_ = review.Environment{ReviewerRestricted: false, OuterGatesRestricted: false, Restriction: "", Limitations: []review.Limitation{{Check: "", Refused: []string{}}}}
 	_ = review.ProbeRun{Command: "", Status: nil, Tree: "", Refused: []string{}}
 	_ = review.Invalid{Review: 0, ForcedRoute: "", ForcedModel: "", Reason: "", Problems: []string{}, RejectedVerdict: 0,
-		NoToolReminder: 0, Pass: verify.Pass{}, Base: &verify.Pass{}, Reopened: false, Repaired: false}
+		NoToolReminder: 0, ProseTurns: 0, ForcedRequests: 0, ForcedAnswered: 0, Route: "", Model: "", ToolChoice: "",
+		Pass: verify.Pass{}, Base: &verify.Pass{}, Reopened: false, Repaired: false}
+	_ = review.Session{NoTool: 0, Restored: false, ProseTurns: 0, ForcedRequests: 0, ForcedAnswered: 0}
 	_ = review.Request{Role: project.Role{}, Instructions: "", Input: []any{}, Tools: []any{},
 		Retain:  func([]any) (json.RawMessage, error) { return nil, nil },
 		Prefill: func([]any) ([]any, error) { return nil, nil }, ForceTool: ""}

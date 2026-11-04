@@ -105,18 +105,28 @@ type Session struct {
 	// conversation keeps them (empty: the current reviewer tools).
 	Tools    []any `json:"tools,omitempty"`
 	Requests int   `json:"requests,omitempty"`
-	// Rejected and NoTool are the allowances this conversation has consumed: one rejected
-	// submit_review (after the unread-progress exemption) and one prose-only turn (the
-	// reminder) are each sent back once, independently of each other. Remind marks the
-	// pending reminder: the next request requires submit_review where the route supports it.
+	// Rejected and NoTool are the allowances this review has consumed: one rejected
+	// submit_review (after the unread-progress exemption) is sent back once, and a prose-only
+	// turn (a model response without a tool call) is sent back with a reminder once per run of
+	// consecutive prose-only turns, at most noToolReminderCap times, independently of each
+	// other. Restored: the reviewer made a tool call since the last reminder, so the next
+	// prose-only turn gets a reminder again. ProseTurns, ForcedRequests (the answered requests
+	// that required submit_review) and ForcedAnswered (those answered with a tool call) count
+	// the review's turns for the record of a review that ends because of prose-only turns.
+	// Remind marks the pending reminder: the next request requires submit_review where the
+	// route supports it.
 	// PrevUnread is the unread-part count of the last unread rejection (the progress
 	// exemption). Reopened marks the reopened conversation of a blocked review. All of them
 	// travel with the checkpoint, so an interruption or a working-window reset keeps them.
-	Rejected   int  `json:"rejected_verdicts,omitempty"`
-	NoTool     int  `json:"no_tool_reminders,omitempty"`
-	Remind     bool `json:"remind,omitempty"`
-	PrevUnread int  `json:"prev_unread,omitempty"`
-	Reopened   bool `json:"reopened,omitempty"`
+	Rejected       int  `json:"rejected_verdicts,omitempty"`
+	NoTool         int  `json:"no_tool_reminders,omitempty"`
+	Restored       bool `json:"no_tool_restored,omitempty"`
+	ProseTurns     int  `json:"prose_turns,omitempty"`
+	ForcedRequests int  `json:"forced_requests,omitempty"`
+	ForcedAnswered int  `json:"forced_answered_with_tool,omitempty"`
+	Remind         bool `json:"remind,omitempty"`
+	PrevUnread     int  `json:"prev_unread,omitempty"`
+	Reopened       bool `json:"reopened,omitempty"`
 	// Repaired: a verdict of this review was already judged and sent back, so the pass it now
 	// works from may hold the reviewer's own verified edits rather than the builder's tree.
 	Repaired bool `json:"repaired,omitempty"`
@@ -373,7 +383,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	feedback = delivery + feedback
 	r.pass = pass
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
@@ -553,7 +563,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	}
 	r.pass = final
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
@@ -626,11 +636,15 @@ func failureIdentities(p verify.Pass) []string {
 }
 
 // converse is the reviewer's requests and tool calls until it submits a valid verdict. Two
-// allowances, spent independently and each once: a rejected submit_review is sent back with its
-// problems, and a prose-only turn is sent back with a reminder (the next request requires
-// submit_review where the route supports it). Spending an allowance a second time ends this
-// review without a verdict (run.invalidStop).
+// allowances, spent independently: a rejected submit_review is sent back with its problems once,
+// and a prose-only turn is sent back with a reminder (the next request requires submit_review
+// where the route supports it) once per run of consecutive prose-only turns: a tool call since
+// the last reminder restores it, up to noToolReminderCap reminders per review. Spending an
+// allowance again ends this review without a verdict (run.invalidStop).
 const reviewBudgetNotice = "Your review working budget is spent. Call submit_review now with what you know; verdict validation and unread-part requirements still apply."
+
+// noToolReminderCap is the most reminders a review gives for prose-only turns.
+const noToolReminderCap = 3
 
 func budgetNotice(input []any) []any {
 	for _, item := range input {
@@ -657,7 +671,8 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			return Verdict{}, err
 		}
 		force := ""
-		if r.sess.Remind || overBudget {
+		required := r.sess.Remind || overBudget
+		if required {
 			mode := "text_fallback"
 			if provider.SupportsToolChoice(core.ProviderRole(r.sess.Role)) {
 				mode = "api_forced"
@@ -716,6 +731,19 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		}
 		input := slices.Concat(active, tools.Replay(resp.Items))
 		calls := tools.Calls(resp.Items)
+		if required {
+			r.sess.ForcedRequests++
+			if len(calls) > 0 {
+				r.sess.ForcedAnswered++
+			}
+		}
+		if len(calls) > 0 {
+			if r.sess.NoTool >= 1 {
+				r.sess.Restored = true
+			}
+		} else {
+			r.sess.ProseTurns++
+		}
 		tl := r.nativeTools
 		if tl == nil {
 			tl = r.in.Tools.Native(ToolNames)
@@ -835,12 +863,16 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			// Progress on unread parts spends neither allowance.
 			r.allowance("unread_progress_exempt")
 		case problems != nil && len(calls) == 0:
-			if r.sess.NoTool >= 1 {
+			if r.sess.NoTool >= 1 && !r.sess.Restored {
 				return Verdict{}, r.invalidStop(problems, "no_tool_reminder_exhausted", force != "")
+			}
+			if r.sess.NoTool >= noToolReminderCap {
+				return Verdict{}, r.invalidStop(problems, "no_tool_reminder_cap", force != "")
 			}
 			input = append(input, map[string]any{"role": "user",
 				"content": "Not a valid verdict: " + strings.Join(problems, "; ") + ". Call submit_review."})
 			r.sess.NoTool++
+			r.sess.Restored = false
 			r.sess.Remind = true
 			r.allowance("no_tool_turn")
 		case problems != nil:
