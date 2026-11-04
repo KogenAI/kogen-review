@@ -18,7 +18,7 @@ import (
 
 // reviewTask is what the external reviewer is asked, besides the authority and the source.
 const reviewTask = "# Review task\n\n" +
-	"Review the candidate above against the approved Intent. The complete authority, the check results, the diff and the full text of every changed file are included in this message; they are Kogen's exact data for this candidate.\n" +
+	"Review the candidate above against the approved Intent. The complete authority, the check results, the diff of changed and deleted files and the full text of added files are included in this message; they are Kogen's exact data for this candidate.\n" +
 	reviewTaskTail
 
 // reviewPartsTask replaces reviewTask's first paragraph when the source is reviewed in parts; it is

@@ -23,7 +23,7 @@ import (
 // The authority (the Intent, its feature and model, the README, the testing rules, the
 // protection and the configured commands) is always delivered verbatim. The candidate's source
 // (the check results, the diff of existing and deleted paths against the start HEAD and the
-// complete text of every changed or added file) goes inline in the opening message when the
+// complete text of added files) goes inline in the opening message when the
 // whole request fits the caller's working window (Env.Prepare); otherwise it moves to pinned
 // parts there. An external review whose complete prompt does not fit one session reviews the
 // parts source in ordered parts (parts.go).
@@ -36,7 +36,7 @@ const MaterialPartBytes = 6000
 type MaterialSet struct {
 	// Authority is the stable part: the approved contract and the commands.
 	Authority string `json:"authority"`
-	// Source is the dynamic part: the check results, the diff and the file texts.
+	// Source is the dynamic part: the check results, diff and added file texts.
 	Source string `json:"source"`
 	// Files is the catalog of changed paths: path, status (changed, added or deleted), Git
 	// mode, Git object, byte count and SHA-256 of the content (the commit id for a gitlink).
@@ -50,19 +50,17 @@ type MaterialSet struct {
 	// Hunks (on_demand only) are the lines each changed hunk occupies: the pinned parts that
 	// cover one of them are required reads before a verdict.
 	Hunks []MaterialHunkRange `json:"hunk_ranges,omitempty"`
-	// Texts are the changed or added text files as they appear in Source (the external
+	// Texts are the added text files as they appear in Source (the external
 	// reviewer's parts keep a path's text whole). Not persisted.
 	Texts []MaterialFileText `json:"-"`
 	// PartsSource is the source of the parts route (an external review whose complete prompt does
-	// not fit one session): Source with the full text of every changed text file left out, and
-	// PartsTexts the added text files that remain in it. Not persisted.
+	// not fit one session): the same source and added texts. Not persisted.
 	PartsSource string             `json:"-"`
 	PartsTexts  []MaterialFileText `json:"-"`
 }
 
 // MaterialHunkRange is the lines (1-based, inclusive) of one changed hunk: kind "diff" within
-// its path's diff block (its header and body), kind "file" within the candidate text of its path
-// (the hunk's new lines; a hunk that only deletes has none).
+// its path's diff block, or kind "file" within an added file.
 type MaterialHunkRange struct {
 	Path  string `json:"path"`
 	Kind  string `json:"kind"`
@@ -79,7 +77,7 @@ type MaterialSegment struct {
 	End   int    `json:"end"`
 }
 
-// MaterialFileText is a changed or added text file as it appears in the source.
+// MaterialFileText is an added text file as it appears in the source.
 type MaterialFileText struct{ Path, Heading, Content string }
 
 // MaterialOf is the review material of in's green pass (in.Evidence.Pass): the changes between
@@ -110,15 +108,54 @@ func MaterialOf(in Input) (MaterialSet, error) {
 		current[e.Path] = e
 	}
 
-	var existing []string
+	origins := map[string]string{}
+	renames := map[string]bool{}
+	renameDest := map[string]bool{}
+	nameStatus, err := repo.OK("diff", "--name-status", "-z", "-M", "-C", "--find-copies-harder", c.Start, pass.Tree, "--")
+	if err != nil {
+		return MaterialSet{}, err
+	}
+	fields := strings.Split(strings.TrimSuffix(nameStatus, "\x00"), "\x00")
+	for i := 0; i < len(fields) && fields[i] != ""; {
+		status := fields[i]
+		i++
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			old, dest := fields[i], fields[i+1]
+			i += 2
+			origins[dest] = old
+			if status[0] == 'R' {
+				renames[old] = true
+				renameDest[dest] = true
+			}
+		} else {
+			i++
+		}
+	}
+	var diffs []string
 	var texts []MaterialFileText
 	var catalog []map[string]any
-	var parts, partsView []string
-	var partsTexts []MaterialFileText
+	var parts []string
 	for _, p := range changed {
+		if renames[p] {
+			continue
+		}
 		old, wasThere := original[p]
+		origin := origins[p]
+		isRename := renameDest[p]
+		if isRename {
+			old, wasThere = original[origin], true
+		}
 		if wasThere {
-			existing = append(existing, p)
+			var d string
+			if isRename {
+				d, err = renameDiff(repo, c.Start, pass.Tree, origin, p)
+			} else {
+				d, err = repo.Diff(c.Start, pass.Tree, []string{p})
+			}
+			if err != nil {
+				return MaterialSet{}, err
+			}
+			diffs = append(diffs, d)
 		}
 		entry, isThere := current[p]
 		tree, at := c.Start, old
@@ -140,41 +177,43 @@ func MaterialOf(in Input) (MaterialSet, error) {
 			status = "added"
 		}
 		catalog = append(catalog, map[string]any{
-			"path": p, "status": status, "mode": at.Mode, "git_object": at.Object,
+			"path": p, "status": status, "origin": origin, "rename": isRename, "mode": at.Mode, "git_object": at.Object,
 			"bytes": len(content), "sha256": core.HashHex([]byte(content)),
 		})
 		if !isThere {
 			parts = append(parts, "--- "+p+" (deleted)")
-			partsView = append(partsView, "--- "+p+" (deleted)")
 			continue
 		}
 		heading := "--- " + p
 		if !wasThere {
 			heading += " (added; mode " + entry.Mode + ")"
 		}
+		if origin != "" {
+			heading += " (from " + origin + ")"
+		}
 		switch {
 		case entry.Mode == "160000":
-			parts = append(parts, heading+"\nSubproject commit "+entry.Object)
-			partsView = append(partsView, heading+"\nSubproject commit "+entry.Object)
-		case utf8.ValidString(content) && !strings.Contains(content, "\x00"):
-			parts = append(parts, heading+"\n"+content)
-			texts = append(texts, MaterialFileText{Path: p, Heading: heading + "\n", Content: content})
 			if wasThere {
-				// A changed file's hunks are in the diff and its full text is in the checkout.
-				partsView = append(partsView, heading+" (changed; full text in the checkout)")
+				parts = append(parts, heading+" (gitlink; change in diff)")
 			} else {
-				partsView = append(partsView, heading+"\n"+content)
-				partsTexts = append(partsTexts, MaterialFileText{Path: p, Heading: heading + "\n", Content: content})
+				parts = append(parts, heading+"\nSubproject commit "+entry.Object)
+			}
+		case utf8.ValidString(content) && !strings.Contains(content, "\x00"):
+			if wasThere {
+				parts = append(parts, heading+" (changed; hunks in diff)")
+			} else {
+				rendered := heading + "\n" + content
+				if content != "" && !strings.HasSuffix(content, "\n") {
+					rendered += "\n\\ No newline at end of file"
+				}
+				parts = append(parts, rendered)
+				texts = append(texts, MaterialFileText{Path: p, Heading: heading + "\n", Content: content})
 			}
 		default:
 			parts = append(parts, heading+" (binary)")
-			partsView = append(partsView, heading+" (binary)")
 		}
 	}
-	diff, err := repo.Diff(c.Start, pass.Tree, existing)
-	if err != nil {
-		return MaterialSet{}, err
-	}
+	diff := strings.Join(diffs, "")
 
 	modelText := ""
 	if t, err := readFile(c.Root, project.ModelPath(in.Intent.Slug)); err == nil {
@@ -215,21 +254,16 @@ func MaterialOf(in Input) (MaterialSet, error) {
 	results := pass.Results()
 	source := "# Check results of the final pass\n\n" + results + "\n\n" +
 		"# Diff of existing/deleted paths against start HEAD " + short(c.Start) + "\n\n" + diff + "\n" +
-		"# Full text of every changed or added file\n\n" +
-		"Newly added files appear here once, with their mode, instead of being repeated in the diff.\n\n" +
-		strings.Join(parts, "\n") + "\n"
-	// Source that is not UTF-8 cannot be carried by JSON: the bytes that are not text become
-	// U+FFFD, as the provider request would make them.
-	source = strings.ToValidUTF8(source, "�")
-	partsSource := "# Check results of the final pass\n\n" + results + "\n\n" +
-		"# Diff of existing/deleted paths against start HEAD " + short(c.Start) + "\n\n" + diff + "\n" +
 		partsHeading + "\n\n" +
-		"Newly added files appear here once, with their mode, instead of being repeated in the diff. A changed file's hunks are in the diff above and its full text is in the checkout, so only its heading is listed here.\n\n" +
-		strings.Join(partsView, "\n") + "\n"
-	partsSource = strings.ToValidUTF8(partsSource, "�")
-
-	set := MaterialSet{Authority: authority, Source: source, Files: catalog, Checks: results, Texts: texts, PartsSource: partsSource, PartsTexts: partsTexts}
+		"Added files appear here with their mode; changed files have hunks in the diff.\n\n" +
+		strings.Join(parts, "\n") + "\n"
+	source = strings.ToValidUTF8(source, "�")
+	set := MaterialSet{Authority: authority, Source: source, Files: catalog, Checks: results, Texts: texts, PartsSource: source, PartsTexts: texts}
 	return set, nil
+}
+
+func renameDiff(repo *git.Repo, start, tree, origin, dest string) (string, error) {
+	return repo.OK("diff", "--no-color", "--no-ext-diff", "--no-textconv", "-M", start, tree, "--", ":(literal)"+origin, ":(literal)"+dest)
 }
 
 var hunkRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
@@ -270,9 +304,13 @@ func materialManifestAt(repo *git.Repo, start, tree string, catalog []map[string
 				ranges = append(ranges, MaterialHunkRange{Path: path, Kind: "file", First: 1, Last: n})
 			}
 		case "changed", "deleted":
-			// A deleted path's diff block lies in the diff text too: covered, and its hunks are
-			// changed lines, but it adds no stat or hunk to the manifest.
-			diff, err := repo.Diff(start, tree, []string{path})
+			var diff string
+			var err error
+			if f["rename"] == true {
+				diff, err = renameDiff(repo, start, tree, f["origin"].(string), path)
+			} else {
+				diff, err = repo.Diff(start, tree, []string{path})
+			}
 			if err != nil {
 				return nil, nil, nil, err
 			}
@@ -302,12 +340,7 @@ func materialManifestAt(repo *git.Repo, start, tree string, catalog []map[string
 					}
 					ranges = append(ranges, MaterialHunkRange{Path: path, Kind: "diff", First: n + 1, Last: total})
 					open = len(ranges) - 1
-					if f["status"] == "deleted" {
-						continue
-					}
-					if newCount > 0 {
-						ranges = append(ranges, MaterialHunkRange{Path: path, Kind: "file", First: newStart, Last: newStart + newCount - 1})
-					}
+
 					hunks = append(hunks, map[string]any{
 						"old_start": num(m[1], 0), "old_count": num(m[2], 1), "new_start": newStart, "new_count": newCount,
 						"header": m[0],
@@ -315,7 +348,7 @@ func materialManifestAt(repo *git.Repo, start, tree string, catalog []map[string
 					continue
 				}
 				switch {
-				case open < 0 || f["status"] == "deleted":
+				case open < 0:
 				case strings.HasPrefix(line, "+"):
 					stat["added"] = stat["added"].(int) + 1
 				case strings.HasPrefix(line, "-"):
