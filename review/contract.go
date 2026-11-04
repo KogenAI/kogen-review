@@ -183,7 +183,12 @@ type Request struct {
 // Env is what a review asks of whoever runs it while it runs.
 type Env interface {
 	// Request sends one request of the reviewer's conversation with the caller's bookkeeping
-	// (working context, checkpoint, usage, provider attempts, image delivery).
+	// (working context, checkpoint, usage, provider attempts, image delivery). The reviewer
+	// hands it its whole conversation; the caller's working window stays the caller's. When it
+	// refuses the request over the request ceiling, before sending, with a *sys.Error
+	// candidate/context_budget_exceeded, the native reviewer resets its own conversation (the
+	// unchanged opening, one handoff and Kogen's newest undelivered messages) and calls
+	// Request once more; any other error, or a second refusal, ends the review.
 	Request(ctx context.Context, r Request) (*provider.Response, []any, error)
 	// Prepare makes the opening conversation of a fresh review of m, the material the review made,
 	// in the working window: the observations of an earlier review are not carried into it.

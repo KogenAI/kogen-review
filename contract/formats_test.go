@@ -184,3 +184,32 @@ func TestRepairProgressSessionRoundTrip(t *testing.T) {
 		t.Fatalf("restored session: %#v", restored)
 	}
 }
+
+// TestSessionResetFieldsEncodeAndDecode pins the reset fields of the session: windows and
+// reset_unread follow the other fields, round-trip, and are omitted from a session that never
+// reset (item reset-persistence).
+func TestSessionResetFieldsEncodeAndDecode(t *testing.T) {
+	t.Parallel()
+	plain, err := fullSession().Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "reset-persistence plain bytes", string(plain), sessionJSON)
+
+	s := fullSession()
+	s.Windows = []review.Window{{File: "review-1-window-1.json", SHA256: strings.Repeat("a", 64)}}
+	s.ResetUnread = []string{"src/part-3.txt"}
+	raw, err := s.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := `,"windows":[{"file":"review-1-window-1.json","sha256":"` + strings.Repeat("a", 64) + `"}],"reset_unread":["src/part-3.txt"]}`
+	if !strings.HasSuffix(string(raw), suffix) {
+		t.Errorf("reset-persistence bytes: %s", raw)
+	}
+	back, err := review.DecodeSession(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "reset-persistence round trip", back, s)
+}

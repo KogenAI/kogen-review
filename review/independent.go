@@ -116,6 +116,12 @@ type Session struct {
 	FailureStreak     int      `json:"failure_streak,omitempty"`
 	// SyntheticBlock marks a repair-limit stop, which is not a submitted verdict.
 	SyntheticBlock bool `json:"synthetic_block,omitempty"`
+	// Windows are the working-context windows this review archived when its Env refused a
+	// request over the request ceiling, and ResetUnread the pinned parts still unread at the
+	// latest of those resets (reset.go). Once the review reset, only parts also in ResetUnread
+	// count as unread.
+	Windows     []Window `json:"windows,omitempty"`
+	ResetUnread []string `json:"reset_unread,omitempty"`
 }
 
 // Encode is the JSON a checkpoint keeps of the session.
@@ -349,6 +355,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	r.pass = pass
 	r.sess = Session{
 		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
@@ -528,6 +535,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	r.pass = final
 	r.sess = Session{
 		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	if err := r.save(route.StageReview); err != nil {
@@ -618,26 +626,43 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
 			})
 		}
-		requestSession := r.sess
-		retain := func(input []any) (json.RawMessage, error) {
-			sent := requestSession
-			sent.Input = input
-			return sent.Encode()
+		send := func() (*provider.Response, []any, error) {
+			requestSession := r.sess
+			retain := func(input []any) (json.RawMessage, error) {
+				sent := requestSession
+				sent.Input = input
+				return sent.Encode()
+			}
+			return env.Request(ctx, Request{
+				Role: r.sess.Role, Instructions: ReviewerInstructions(),
+				Input: r.sess.Input, Tools: r.tools, Retain: retain, ForceTool: force,
+				Prefill: func(input []any) ([]any, error) {
+					prepared, err := env.Prefill(r.sess.Role, ReviewerInstructions(), r.tools, input)
+					if err != nil {
+						return nil, err
+					}
+					if overBudget {
+						prepared = budgetNotice(prepared)
+					}
+					return prepared, nil
+				},
+			})
 		}
-		resp, active, err := env.Request(ctx, Request{
-			Role: r.sess.Role, Instructions: ReviewerInstructions(),
-			Input: r.sess.Input, Tools: r.tools, Retain: retain, ForceTool: force,
-			Prefill: func(input []any) ([]any, error) {
-				prepared, err := env.Prefill(r.sess.Role, ReviewerInstructions(), r.tools, input)
-				if err != nil {
-					return nil, err
-				}
-				if overBudget {
-					prepared = budgetNotice(prepared)
-				}
-				return prepared, nil
-			},
-		})
+		resp, active, err := send()
+		if err != nil && refusesCeiling(err) {
+			// The Env refused the whole conversation before sending: the reviewer resets its own
+			// working context once and sends the request again (reset.go).
+			event, progress, rerr := r.reset(err, force, overBudget)
+			if rerr != nil {
+				return Verdict{}, rerr
+			}
+			if err := r.save(route.StageReview); err != nil {
+				return Verdict{}, err
+			}
+			env.Event(event)
+			env.Progress(progress)
+			resp, active, err = send()
+		}
 		if err != nil {
 			return Verdict{}, err
 		}
@@ -791,7 +816,6 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 // HEAD; changes has a blocking finding, approve none; and an approval has read all pinned source
 // parts. It returns the verdict, or the problems to send back.
 func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, error) {
-	env := r.env
 	verdict, _ := args["verdict"].(string)
 	list, isList := args["findings"].([]any)
 	if (verdict != "approve" && verdict != "changes") || !isList {
@@ -862,7 +886,7 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	requirements, reqProblems := r.requirements(args, verdict, findings, input)
 	problems = append(problems, reqProblems...)
 	if verdict == "changes" && !r.external {
-		unread, err := env.Unread(input)
+		unread, err := r.unread(input)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -872,7 +896,7 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 		}
 	}
 	if verdict == "approve" && !r.external {
-		unread, err := env.Unread(input)
+		unread, err := r.unread(input)
 		if err != nil {
 			return nil, nil, err
 		}

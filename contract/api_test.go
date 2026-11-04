@@ -56,6 +56,7 @@ var (
 	_ = review.Session{
 		Role: project.Role{}, Input: []any{}, Usage: core.Tokens{}, Attempts: []review.Submitted{},
 		Verdict: &review.Verdict{}, Tree: "", Tools: []any{},
+		Windows: []review.Window{{File: "", SHA256: ""}}, ResetUnread: []string{},
 	}
 	_ = review.Submitted{Pass: 0, Tree: "", Verdict: "", Findings: []map[string]any{}}
 	_ = review.Verdict{Verdict: "", Findings: []map[string]any{}}
