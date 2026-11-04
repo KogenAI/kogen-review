@@ -7,6 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/KogenAI/kogen-executor/core"
+	"github.com/KogenAI/kogen-review/review"
+	"kogen-loop/sys"
 )
 
 func TestInitialVerificationStops(t *testing.T) {
@@ -83,5 +87,15 @@ func TestInitialVerificationStops(t *testing.T) {
 				t.Fatalf("state %q: %s", record.State, b)
 			}
 		})
+	}
+}
+
+func TestReportVerificationErrorRetainsSubmittedEvidence(t *testing.T) {
+	findings := []map[string]any{{"path": "value.txt", "line": 1, "severity": "note", "message": "Corrected the count"}}
+	e := sys.Fail("review", "repair_unverified", "not verified", 1)
+	e.Lines = []string{"original line"}
+	out, code := report(review.Result{Record: core.ReviewRecord{Verdict: "approve", Tree: "edited", Findings: findings}, Repairs: 2}, e)
+	if code == 0 || out.Verdict != "error" || out.Error.Class != "review" || out.Error.Reason != "repair_unverified" || out.Error.Detail != "not verified" || len(out.Error.Lines) != 1 || out.Error.Lines[0] != "original line" || out.Tree != "edited" || out.Submitted == nil || out.Submitted.Verdict != "approve" || len(out.Findings) != 1 || out.Repairs != 2 {
+		t.Fatalf("report: %+v code %d", out, code)
 	}
 }

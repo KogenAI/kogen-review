@@ -134,7 +134,9 @@ type Run struct {
 // holds the reviewer's repairs: Pass.Tree differs from the candidate's tree when it repaired), and
 // the number of repair rounds it took. A review that stops returns an error: a valid blocking
 // verdict (candidate/review_blocked) with its Record; one without a valid verdict
-// (candidate/review_invalid) with Invalid.
+// (candidate/review_invalid) with Invalid. A verification error after submission retains the
+// latest submitted Record and completed repair count; that Record is not an approval of an
+// unverified tree. The error remains authoritative.
 type Result struct {
 	Record  core.ReviewRecord
 	Pass    verify.Pass

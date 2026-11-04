@@ -39,13 +39,20 @@ func main() {
 
 // result is the line the command prints on stdout.
 type result struct {
+	Verdict   string           `json:"verdict"`
+	Findings  []map[string]any `json:"findings"`
+	Tree      string           `json:"tree"`
+	Repairs   int              `json:"repairs"`
+	Run       string           `json:"run"`
+	Error     *stop            `json:"error"`
+	Invalid   *invalid         `json:"invalid"`
+	Submitted *submitted       `json:"submitted"`
+}
+
+type submitted struct {
 	Verdict  string           `json:"verdict"`
 	Findings []map[string]any `json:"findings"`
 	Tree     string           `json:"tree"`
-	Repairs  int              `json:"repairs"`
-	Run      string           `json:"run"`
-	Error    *stop            `json:"error"`
-	Invalid  *invalid         `json:"invalid"`
 }
 
 type stop struct {
@@ -255,9 +262,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 // report is the result of a review and the command's exit code.
 func report(res review.Result, err error) (result, int) {
 	out := result{Verdict: "error", Findings: []map[string]any{}, Repairs: res.Repairs}
-	if err == nil {
-		out.Verdict, out.Tree = res.Record.Verdict, res.Record.Tree
+	if res.Record.Verdict != "" {
+		out.Tree = res.Record.Tree
 		out.Findings = core.NonNil(res.Record.Findings)
+		out.Submitted = &submitted{Verdict: res.Record.Verdict, Findings: out.Findings, Tree: out.Tree}
+	}
+	if err == nil {
+		out.Verdict = res.Record.Verdict
 		return out, 0
 	}
 	se, ok := sys.AsError(err)

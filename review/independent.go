@@ -114,6 +114,8 @@ type Session struct {
 	RepairRounds      int      `json:"repair_rounds,omitempty"`
 	FailureIdentities []string `json:"failure_identities,omitempty"`
 	FailureStreak     int      `json:"failure_streak,omitempty"`
+	// SyntheticBlock marks a repair-limit stop, which is not a submitted verdict.
+	SyntheticBlock bool `json:"synthetic_block,omitempty"`
 }
 
 // Encode is the JSON a checkpoint keeps of the session.
@@ -309,7 +311,12 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	verdict := r.sess.Verdict
 	pass, err := env.Verify(ctx)
 	if err != nil {
-		return Result{}, err
+		record := core.ReviewRecord{N: r.in.Number, Verdict: verdict.Verdict, Findings: core.NonNil(verdict.Findings), Tree: r.sess.Tree}
+		if (r.sess.SyntheticBlock || r.legacySyntheticBlock()) && len(r.sess.Attempts) > 0 {
+			last := r.sess.Attempts[len(r.sess.Attempts)-1]
+			record = core.ReviewRecord{N: r.in.Number, Verdict: last.Verdict, Findings: core.NonNil(last.Findings), Tree: last.Tree}
+		}
+		return Result{Record: record, Repairs: r.sess.RepairRounds}, err
 	}
 	attempts := append(slices.Clone(r.sess.Attempts), Submitted{
 		Pass: r.pass.N, Tree: r.sess.Tree, Verdict: verdict.Verdict, Findings: verdict.Findings,
@@ -345,6 +352,24 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
+}
+
+// legacySyntheticBlock recognizes repair-limit checkpoints written before the marker existed.
+func (r *run) legacySyntheticBlock() bool {
+	s := r.sess
+	if s.Verdict == nil || s.Verdict.Verdict != "changes" || len(s.Verdict.Findings) != 1 || len(s.Attempts) == 0 {
+		return false
+	}
+	reason := "repeated identical final failures"
+	if s.FailureStreak < 3 {
+		if s.RepairRounds < 20 {
+			return false
+		}
+		reason = "repair round hard cap"
+	}
+	message := fmt.Sprintf("%s after %d repair rounds; current failing stage/items: %s", reason, s.RepairRounds, strings.Join(failureIdentities(r.pass), ", "))
+	f := s.Verdict.Findings[0]
+	return f["path"] == "" && f["severity"] == "blocking" && f["message"] == message
 }
 
 // seenTree is the tree whose bytes the reviewer holds.
@@ -435,7 +460,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 			return Result{}, false, err
 		}
 		if final, err = env.Verify(ctx); err != nil {
-			return Result{}, false, err
+			return Result{Record: review, Repairs: r.sess.RepairRounds}, false, err
 		}
 	}
 	if tree == seen && final.Green && final.Tree == tree {
@@ -482,6 +507,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		r.pass = final
 		r.sess.Verdict, r.sess.Tree, r.sess.Attempts = &blocked, final.Tree, attempts
 		r.sess.Repaired = true
+		r.sess.SyntheticBlock = true
 		if err := r.save(route.StageReviewVerify); err != nil {
 			return Result{}, false, err
 		}

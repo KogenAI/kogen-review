@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -146,4 +147,94 @@ func TestBlockedRepairResumeCanApprove(t *testing.T) {
 	if len(h.requests) != 1 || len(h.requests[0].Input) < 2 {
 		t.Fatal("blocked conversation was not reopened")
 	}
+}
+
+type unavailableEnv struct {
+	*fakeEnv
+	err error
+}
+
+func (h *unavailableEnv) Verify(context.Context) (verify.Pass, error) { return verify.Pass{}, h.err }
+
+func TestVerificationErrorRetainsSubmission(t *testing.T) {
+	for _, mode := range []string{"resume-approval", "resume-blocked", "external"} {
+		t.Run(mode, func(t *testing.T) {
+			in, base := newReview(t)
+			unavailable := fmt.Errorf("verification unavailable")
+			h := &unavailableEnv{fakeEnv: base, err: unavailable}
+			findings := []map[string]any{{"path": "app.txt", "line": json.Number("1"), "severity": "note", "message": "Corrected the count"}}
+			verdict := review.Verdict{Verdict: "approve", Findings: findings}
+			var res review.Result
+			var err error
+			if mode == "external" {
+				x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(`{"verdict":"approve","findings":[{"path":"app.txt","line":1,"severity":"note","message":"Corrected the count"}]}`)}}
+				in.Tools.Round = func(ctx context.Context, s executor.Session, input executor.Input) (executor.RoundResult, error) {
+					writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+					return s.Round(ctx, input)
+				}
+				res, err = review.NewExternal(x, externalDescriptor(), 3).Review(context.Background(), in, h)
+			} else {
+				if mode == "resume-blocked" {
+					verdict.Verdict = "changes"
+					findings[0]["severity"] = "blocking"
+				}
+				pass := greenPass()
+				raw, e := (review.Session{Role: reviewRole, Usage: core.ZeroTokens(), Seen: greenTree, Tree: otherTree, Verdict: &verdict, RepairRounds: 2}).Encode()
+				if e != nil {
+					t.Fatal(e)
+				}
+				in.Checkpoint = &review.Checkpoint{Stage: route.StageReviewVerify, Pass: &pass, Session: raw}
+				res, err = review.Independent{}.Resume(context.Background(), in, h)
+			}
+			if err != unavailable {
+				t.Fatalf("error: %v", err)
+			}
+			eq(t, "submitted verdict", res.Record.Verdict, verdict.Verdict)
+			eq(t, "submitted tree", res.Record.Tree, otherTree)
+			deepEq(t, "findings", res.Record.Findings, findings)
+			if mode != "external" {
+				eq(t, "completed rounds", res.Repairs, 2)
+			} else {
+				eq(t, "completed rounds", res.Repairs, 0)
+			}
+		})
+	}
+}
+
+func TestRepairLimitResumeVerificationErrorRetainsActualSubmission(t *testing.T) {
+	in, base := newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+	base.answers = []*provider.Response{submitReview(`{"verdict":"approve","findings":[]}`), submitReview(`{"verdict":"approve","findings":[]}`), submitReview(`{"verdict":"approve","findings":[]}`)}
+	for i := 0; i < 3; i++ {
+		base.verifies = append(base.verifies, verify.Pass{N: i + 2, Tree: greenTree, Failing: []string{"check:lint"}})
+	}
+	_, err := review.Independent{}.Review(context.Background(), in, base)
+	wantError(t, "limit", err, "candidate", "review_blocked")
+	cp := base.saves[len(base.saves)-1]
+	in.Checkpoint = &cp
+	unavailable := fmt.Errorf("verification unavailable")
+	res, err := review.Independent{}.Resume(context.Background(), in, &unavailableEnv{fakeEnv: base, err: unavailable})
+	if err != unavailable {
+		t.Fatalf("error: %v", err)
+	}
+	eq(t, "actual verdict", res.Record.Verdict, "approve")
+	eq(t, "actual tree", res.Record.Tree, otherTree)
+	eq(t, "completed rounds", res.Repairs, 3)
+	// Checkpoints created before the synthetic marker must retain the same evidence.
+	saved, e := review.DecodeSession(cp.Session)
+	if e != nil {
+		t.Fatal(e)
+	}
+	saved.SyntheticBlock = false
+	cp.Session, e = saved.Encode()
+	if e != nil {
+		t.Fatal(e)
+	}
+	in.Checkpoint = &cp
+	res, err = review.Independent{}.Resume(context.Background(), in, &unavailableEnv{fakeEnv: base, err: unavailable})
+	if err != unavailable {
+		t.Fatalf("legacy error: %v", err)
+	}
+	eq(t, "legacy actual verdict", res.Record.Verdict, "approve")
+	eq(t, "legacy actual tree", res.Record.Tree, otherTree)
 }
