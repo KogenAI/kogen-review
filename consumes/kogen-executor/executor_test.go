@@ -215,7 +215,7 @@ func TestExecutorValueJSONKeys(t *testing.T) {
 			}
 		}
 	}
-	has("executor.Task", keys(executor.Task{}), "role", "root", "brief", "protected", "excluded", "model", "effort", "approval", "start_tree", "run_id", "max_rounds", "home", "dir")
+	has("executor.Task", keys(executor.Task{}), "role", "root", "brief", "protected", "excluded", "model", "effort", "approval", "start_tree", "run_id", "home", "dir")
 	has("executor.Task.Schema", keys(executor.Task{Schema: json.RawMessage(`{}`)}), "schema")
 	has("executor.Brief", keys(executor.Brief{}), "stable", "dynamic")
 	has("executor.Input", keys(executor.Input{}), "feedback")

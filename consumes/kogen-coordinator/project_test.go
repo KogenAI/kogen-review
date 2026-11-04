@@ -57,7 +57,6 @@ models:
     executor: claude-code
     model: claude-opus-5-5
     effort: high
-    max_rounds: 2
 `
 
 func TestLoadConfigReadsTheCommands(t *testing.T) {

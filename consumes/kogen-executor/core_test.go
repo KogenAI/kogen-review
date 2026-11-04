@@ -45,7 +45,7 @@ func TestTokensPlus(t *testing.T) {
 }
 
 func TestProviderRole(t *testing.T) {
-	got := core.ProviderRole(project.Role{Provider: "openai-compatible", Model: "m", Effort: "high", BaseURL: "http://x", Executor: "ignored", MaxRounds: 3})
+	got := core.ProviderRole(project.Role{Provider: "openai-compatible", Model: "m", Effort: "high", BaseURL: "http://x", Executor: "ignored"})
 	eq(t, "core.ProviderRole", got, provider.Role{Provider: "openai-compatible", Model: "m", Effort: "high", BaseURL: "http://x"})
 	eq(t, "core.ProviderRole empty", core.ProviderRole(project.Role{}), provider.Role{})
 }
