@@ -199,11 +199,12 @@ func shellCall(command string) *provider.Response {
 // TestIndependentReviewRecordsItsProbesAndRequirements pins that the native review records the
 // command of each shell call in Session.Probes, keeps it in the checkpoint and carries it through
 // a repair round, that a probe it ran may be cited, and that review-1.json keeps the
-// requirements, [] when the submission had none (items session-probes, review-requirements).
+// requirements, [] when the submission had none, together with the exit status and tree of each
+// call in Session.ProbeRuns (items session-probes, session-probe-runs, review-requirements).
 func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
 	t.Parallel()
 	in, h := newReview(t)
-	h.answers = []*provider.Response{shellCall("echo probed"), submitReview(`{"verdict":"approve","findings":[]}`)}
+	h.answers = []*provider.Response{shellCall("cat app.txt"), submitReview(`{"verdict":"approve","findings":[]}`)}
 	if _, err := (review.Independent{}).Review(context.Background(), in, h); err != nil {
 		t.Fatal(err)
 	}
@@ -211,15 +212,17 @@ func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deepEq(t, "session-probes checkpoint", s.Probes, []string{"echo probed"})
+	deepEq(t, "session-probes checkpoint", s.Probes, []string{"cat app.txt"})
+	zero := 0
+	deepEq(t, "session-probe-runs checkpoint", s.ProbeRuns, []review.ProbeRun{{Command: "cat app.txt", Status: &zero, Tree: greenTree}})
 	rec := readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
 	deepEq(t, "review-requirements empty", rec["requirements"], any([]any{}))
 
 	// A repair round carries the probes forward, and a probe cited after it has run is accepted.
 	in, h = newReview(t)
 	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
-	const cited = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"echo probed","met":true}]}`
-	h.answers = []*provider.Response{shellCall("echo probed"), submitReview(cited), submitReview(cited)}
+	const cited = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"cat app.txt","met":true}]}`
+	h.answers = []*provider.Response{shellCall("cat app.txt"), submitReview(cited), submitReview(cited)}
 	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
 	ap, err := review.Independent{}.Review(context.Background(), in, h)
 	if err != nil {
@@ -229,7 +232,7 @@ func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
 	eq(t, "session-probes repaired record", ap.Record.Verdict, "approve")
 	var carried bool
 	for _, c := range h.saves {
-		if s, err := review.DecodeSession(c.Session); err == nil && s.Repaired && slices.Equal(s.Probes, []string{"echo probed"}) {
+		if s, err := review.DecodeSession(c.Session); err == nil && s.Repaired && slices.Equal(s.Probes, []string{"cat app.txt"}) && len(s.ProbeRuns) == 1 && len(s.Listed) == 1 {
 			if s.Requests < 2 {
 				t.Errorf("repair feedback lost request count: %d", s.Requests)
 			}
@@ -242,6 +245,55 @@ func TestIndependentReviewRecordsItsProbesAndRequirements(t *testing.T) {
 	rec = readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
 	reqs, _ := rec["requirements"].([]any)
 	eq(t, "review-requirements entries", len(reqs), 1)
+}
+
+// lastOutput is the text of the last item of a request's input: the tool result it ends with.
+func lastOutput(r review.Request) string {
+	m, _ := r.Input[len(r.Input)-1].(map[string]any)
+	out, _ := m["output"].(string)
+	return out
+}
+
+// TestIndependentReviewJudgesACitedProbeByItsLatestRun pins that a probe cited after the tree
+// changed since its latest run is refused with both trees, that running it again on the current
+// tree establishes the requirement, and that the refused listing keeps the requirement from a
+// later approval that drops it, whether requirements are absent or the entry is missing (items
+// validate-evidence, session-listed).
+func TestIndependentReviewJudgesACitedProbeByItsLatestRun(t *testing.T) {
+	t.Parallel()
+	const cited = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"cat app.txt","met":true}]}`
+	in, h := newReview(t)
+	edit := shellCall("printf '%s\\n' 'candidate, edited after the green pass' > app.txt")
+	h.answers = []*provider.Response{shellCall("cat app.txt"), edit, submitReview(cited), shellCall("cat app.txt"), submitReview(cited)}
+	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "validate-evidence older tree requests", len(h.requests), 5)
+	eq(t, "validate-evidence older tree refusal", lastOutput(h.requests[3]), `invalid verdict:
+requirement "R1" cites probe "cat app.txt", whose latest run in this review was on tree `+greenTree+`, not on the current tree `+otherTree+`: run it again on the current tree before citing it`)
+	eq(t, "validate-evidence older tree verdict", res.Record.Verdict, "approve")
+
+	for name, second := range map[string]string{
+		"absent":  `{"verdict":"approve","findings":[]}`,
+		"missing": `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R2","evidence":"test","ref":"t","met":true}]}`,
+	} {
+		in, h := newReview(t)
+		h.answers = []*provider.Response{submitReview(cited), submitReview(second)}
+		res, err := review.Independent{}.Review(context.Background(), in, h)
+		wantError(t, "session-listed "+name, err, "candidate", "review_invalid")
+		const dropped = `requirement "R1" was listed by an earlier submission of this review and is missing: keep every requirement in requirements, with evidence observed on the current tree`
+		eq(t, "session-listed "+name+" refusal", lastOutput(h.requests[1]), "invalid verdict:\nrequirement \"R1\" cites a probe that did not run in this review: run its command with shell before citing it")
+		if res.Invalid == nil || !slices.Contains(res.Invalid.Problems, dropped) {
+			t.Errorf("session-listed %s: the missing requirement was not a problem: %+v", name, res.Invalid)
+		}
+		s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deepEq(t, "session-listed "+name+" checkpoint", s.Listed, []string{"R1"})
+	}
 }
 
 func TestThirdRequestSequence(t *testing.T) {

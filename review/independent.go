@@ -12,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-coordinator/route"
@@ -69,6 +71,14 @@ type Requirement struct {
 	Met         bool   `json:"met"`
 }
 
+// ProbeRun is one shell call of a review: its command, the exit status the shell tool reported
+// (nil when its result has none, as a refused call's) and the candidate's tree right after it.
+type ProbeRun struct {
+	Command string `json:"command"`
+	Status  *int   `json:"status"`
+	Tree    string `json:"tree"`
+}
+
 // Submitted is one submitted verdict of a review: the pass it followed and the tree it
 // judged.
 type Submitted struct {
@@ -110,7 +120,14 @@ type Session struct {
 	Repaired bool `json:"repaired,omitempty"`
 	// Probes are the commands of the shell calls this review ran, in order: the probes its
 	// verdict's requirements may cite.
-	Probes            []string `json:"probes,omitempty"`
+	Probes []string `json:"probes,omitempty"`
+	// ProbeRuns are those shell calls with the exit status the tool reported and the candidate's
+	// tree right after the call: what a probe a requirement cites is judged by.
+	ProbeRuns []ProbeRun `json:"probe_runs,omitempty"`
+	// Listed are the requirement texts of every well-formed requirements array a submission of
+	// this review gave, accepted or refused, each once in the order first listed: a later
+	// approval cannot drop one.
+	Listed            []string `json:"listed_requirements,omitempty"`
 	RepairRounds      int      `json:"repair_rounds,omitempty"`
 	FailureIdentities []string `json:"failure_identities,omitempty"`
 	FailureStreak     int      `json:"failure_streak,omitempty"`
@@ -354,7 +371,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	feedback = delivery + feedback
 	r.pass = pass
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
@@ -534,7 +551,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	}
 	r.pass = final
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
@@ -725,13 +742,18 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				if err != nil {
 					return Verdict{}, err
 				}
-				if command, _ := call.Args()["command"].(string); call.Name == "shell" && command != "" {
+				command, _ := call.Args()["command"].(string)
+				probe := call.Name == "shell" && command != ""
+				if probe {
 					r.sess.Probes = append(r.sess.Probes, command)
 				}
 				if edits {
 					after, err := candidateTree(r.in.Candidate)
 					if err != nil {
 						return Verdict{}, err
+					}
+					if probe {
+						r.sess.ProbeRuns = append(r.sess.ProbeRuns, ProbeRun{Command: command, Status: exitStatus(out.Text), Tree: after})
 					}
 					if before == r.seenTree() {
 						r.sess.Seen = after
@@ -883,7 +905,10 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	case verdict == "approve" && blocking > 0:
 		problems = append(problems, "an approve verdict cannot have blocking findings")
 	}
-	requirements, reqProblems := r.requirements(args, verdict, findings, input)
+	requirements, reqProblems, err := r.requirements(args, verdict, findings, input)
+	if err != nil {
+		return nil, nil, err
+	}
 	problems = append(problems, reqProblems...)
 	if verdict == "changes" && !r.external {
 		unread, err := r.unread(input)
@@ -911,19 +936,25 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	return &Verdict{Verdict: verdict, Findings: findings, Requirements: requirements}, nil, nil
 }
 
+// requirementSuffix ends the problems of evidence that cannot be established here.
+const requirementSuffix = "cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run"
+
 // requirements checks a submission's requirements: absent or null is none; otherwise an array of
-// {requirement, evidence, ref, met}. An approval needs evidence for every entry that shows it met
-// and, for the native reviewer, a probe it cites must be the command of a shell call of this
-// review; a changes verdict quotes each unmet requirement in a blocking finding.
-func (r *run) requirements(args map[string]any, verdict string, findings []map[string]any, input []any) ([]Requirement, []string) {
+// {requirement, evidence, ref, met}. An approval needs evidence for every entry that shows it met:
+// a probe the native reviewer cites must have run in this review, on the current tree, succeeded
+// and named a file or directory of the candidate, and an acceptance scenario must have passed in
+// the pass under review of the current tree; an approval keeps every requirement an earlier
+// submission of this review listed. A changes verdict quotes each unmet requirement in a blocking
+// finding.
+func (r *run) requirements(args map[string]any, verdict string, findings []map[string]any, input []any) ([]Requirement, []string, error) {
 	raw, present := args["requirements"]
 	if !present || raw == nil {
-		return nil, nil
+		return nil, missing(verdict, r.sess.Listed, nil), nil
 	}
 	shape := []string{"requirements must be a JSON array of objects with requirement (a non-empty string), evidence (test, acceptance, probe or none), ref (a string, non-empty unless evidence is none) and met (a boolean)"}
 	list, ok := raw.([]any)
 	if !ok {
-		return nil, shape
+		return nil, shape, nil
 	}
 	var out []Requirement
 	for _, item := range list {
@@ -934,10 +965,17 @@ func (r *run) requirements(args map[string]any, verdict string, findings []map[s
 		met, metOK := m["met"].(bool)
 		known := evidence == "test" || evidence == "acceptance" || evidence == "probe" || evidence == "none"
 		if m == nil || !textOK || text == "" || !known || !refOK || (ref == "" && evidence != "none") || !metOK {
-			return nil, shape
+			return nil, shape, nil
 		}
 		out = append(out, Requirement{Requirement: text, Evidence: evidence, Ref: ref, Met: met})
 	}
+	listed := slices.Clone(r.sess.Listed)
+	for _, q := range out {
+		if !slices.Contains(r.sess.Listed, q.Requirement) {
+			r.sess.Listed = append(r.sess.Listed, q.Requirement)
+		}
+	}
+	e := &evidenceCheck{r: r}
 	var problems []string
 	for _, q := range out {
 		quoted := "requirement \"" + q.Requirement + "\""
@@ -950,9 +988,222 @@ func (r *run) requirements(args map[string]any, verdict string, findings []map[s
 			problems = append(problems, quoted+" cites a probe that did not run in this review: run its command with shell before citing it")
 		case verdict == "changes" && !q.Met && !quotes(findings, q.Requirement):
 			problems = append(problems, quoted+" is not met: a changes verdict needs a blocking finding whose message quotes it")
+		case verdict == "approve" && q.Evidence == "probe" && !r.external:
+			problem, err := e.probe(quoted, q.Ref, input)
+			if err != nil {
+				return nil, nil, err
+			}
+			if problem != "" {
+				problems = append(problems, problem)
+			}
+		case verdict == "approve" && q.Evidence == "acceptance":
+			problem, err := e.acceptance(quoted, q.Ref)
+			if err != nil {
+				return nil, nil, err
+			}
+			if problem != "" {
+				problems = append(problems, problem)
+			}
 		}
 	}
-	return out, problems
+	kept := make([]string, 0, len(out))
+	for _, q := range out {
+		kept = append(kept, q.Requirement)
+	}
+	return out, append(problems, missing(verdict, listed, kept)...), nil
+}
+
+// missing lists, for an approval, the requirements an earlier submission listed that kept does
+// not have.
+func missing(verdict string, listed, kept []string) []string {
+	if verdict != "approve" {
+		return nil
+	}
+	var problems []string
+	for _, text := range listed {
+		if !slices.Contains(kept, text) {
+			problems = append(problems, "requirement \""+text+"\" was listed by an earlier submission of this review and is missing: keep every requirement in requirements, with evidence observed on the current tree")
+		}
+	}
+	return problems
+}
+
+// evidenceCheck judges requirement evidence against the current tree, computed once and only
+// when a check needs it.
+type evidenceCheck struct {
+	r     *run
+	tree  string
+	files []string
+	read  bool
+}
+
+func (e *evidenceCheck) current() (string, error) {
+	if !e.read {
+		tree, err := candidateTree(e.r.in.Candidate)
+		if err != nil {
+			return "", err
+		}
+		e.tree, e.read = tree, true
+	}
+	return e.tree, nil
+}
+
+// names reports whether command names a file of the current tree, or a directory holding one.
+func (e *evidenceCheck) names(command string) (bool, error) {
+	tree, err := e.current()
+	if err != nil {
+		return false, err
+	}
+	if e.files == nil {
+		out, err := e.r.in.Candidate.Repo.OK("ls-tree", "-r", "--name-only", "-z", tree)
+		if err != nil {
+			return false, err
+		}
+		e.files = append([]string{}, strings.Split(out, "\x00")...)
+	}
+	root := e.r.in.Candidate.Root + "/"
+	pieces := strings.FieldsFunc(command, func(c rune) bool {
+		return unicode.IsSpace(c) || strings.ContainsRune("'\"`$()<>|&;={}", c)
+	})
+	for _, piece := range pieces {
+		piece = strings.TrimPrefix(piece, root)
+		for strings.HasPrefix(piece, "./") {
+			piece = piece[2:]
+		}
+		piece = strings.TrimSuffix(piece, "/...")
+		piece = strings.TrimSuffix(piece, "/")
+		if piece == "" {
+			continue
+		}
+		for _, f := range e.files {
+			if f == piece || strings.HasPrefix(f, piece+"/") {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// probe is the problem of a cited probe that does not establish its requirement, or "".
+func (e *evidenceCheck) probe(quoted, command string, input []any) (string, error) {
+	named, err := e.names(command)
+	if err != nil {
+		return "", err
+	}
+	if !named {
+		return quoted + " cites probe \"" + command + "\", which names no file or directory of the current tree: a probe is evidence only when it exercises the candidate; run a focused probe of the requirement with shell on the current tree and cite its exact command", nil
+	}
+	run := e.r.latestRun(command, input)
+	if run.Status == nil || *run.Status != 0 {
+		observed := "no exit status"
+		if run.Status != nil {
+			observed = "exit status " + strconv.Itoa(*run.Status)
+		}
+		return quoted + " cites probe \"" + command + "\", whose latest run in this review did not succeed (" + observed + "): a probe that did not succeed does not show the requirement met; repair the candidate, or submit changes with a blocking finding that quotes the requirement", nil
+	}
+	if run.Tree != "" {
+		current, err := e.current()
+		if err != nil {
+			return "", err
+		}
+		if run.Tree != current {
+			return quoted + " cites probe \"" + command + "\", whose latest run in this review was on tree " + run.Tree + ", not on the current tree " + current + ": run it again on the current tree before citing it", nil
+		}
+	}
+	return "", nil
+}
+
+// acceptance is the problem of a cited acceptance scenario that the pass under review does not
+// show passed on the current tree, or "".
+func (e *evidenceCheck) acceptance(quoted, ref string) (string, error) {
+	pass := e.r.pass
+	cites := quoted + " cites acceptance \"" + ref + "\""
+	if pass.Acceptance == nil {
+		return cites + ", which did not run on the current tree (not_run): naming a scenario is not evidence; " + requirementSuffix, nil
+	}
+	current, err := e.current()
+	if err != nil {
+		return "", err
+	}
+	if pass.Tree != current {
+		return cites + ", whose result is of tree " + pass.Tree + ", not of the current tree " + current + ": an earlier result is history and does not establish the requirement on the current tree; " + requirementSuffix, nil
+	}
+	cited := false
+	for _, sc := range pass.Acceptance.Scenarios {
+		if !citesScenario(ref, sc) {
+			continue
+		}
+		cited = true
+		switch sc.Status {
+		case "passed":
+		case "failed":
+			return quoted + " cites acceptance scenario \"" + sc.Name + "\", which failed on the current tree: the observed result contradicts met; repair the candidate, or submit changes with a blocking finding that quotes the requirement", nil
+		default:
+			return quoted + " cites acceptance scenario \"" + sc.Name + "\", whose result on the current tree is " + sc.Status + ", not passed: " + requirementSuffix, nil
+		}
+	}
+	if !cited {
+		return cites + ", which names no scenario of the acceptance result: name the scenario that exercises the requirement, or " + requirementSuffix, nil
+	}
+	return "", nil
+}
+
+// citesScenario reports whether ref contains the scenario's name or the text of one of its steps.
+func citesScenario(ref string, sc verify.ScenarioResult) bool {
+	if sc.Name != "" && strings.Contains(ref, sc.Name) {
+		return true
+	}
+	for _, step := range sc.Steps {
+		if step.Text != "" && strings.Contains(ref, step.Text) {
+			return true
+		}
+	}
+	return false
+}
+
+// exitStatus is N when a shell result text begins with "exit status: N" and a newline or its
+// end, and nil otherwise.
+func exitStatus(text string) *int {
+	rest, ok := strings.CutPrefix(text, "exit status: ")
+	if !ok {
+		return nil
+	}
+	digits, _, _ := strings.Cut(rest, "\n")
+	n, err := strconv.Atoi(digits)
+	if err != nil || strings.HasPrefix(digits, "+") {
+		return nil
+	}
+	return &n
+}
+
+// latestRun is the last run of the shell command: the session's last ProbeRun of it, else the
+// last shell call of it in input with the status of its output and no tree, else (a command known
+// only from the session's probes) a run with neither.
+func (r *run) latestRun(command string, input []any) ProbeRun {
+	for i := len(r.sess.ProbeRuns) - 1; i >= 0; i-- {
+		if r.sess.ProbeRuns[i].Command == command {
+			return r.sess.ProbeRuns[i]
+		}
+	}
+	for i := len(input) - 1; i >= 0; i-- {
+		m, _ := input[i].(map[string]any)
+		if m["type"] != "function_call" || m["name"] != "shell" {
+			continue
+		}
+		args, _ := m["arguments"].(string)
+		if c, _ := tools.DecodeArguments(args)["command"].(string); c != command {
+			continue
+		}
+		run := ProbeRun{Command: command}
+		for _, item := range input {
+			o, _ := item.(map[string]any)
+			if text, _ := o["output"].(string); o["type"] == "function_call_output" && o["call_id"] == m["call_id"] {
+				run.Status = exitStatus(text)
+			}
+		}
+		return run
+	}
+	return ProbeRun{Command: command}
 }
 
 // ran reports whether command is the command of a shell call of this review: one the session
@@ -1012,5 +1263,5 @@ func unreadProblemCount(problems []string) int {
 // Validate checks a submit_review call of the native reviewer's conversation input as the
 // reviewer of in does (REV-4): it returns the verdict, or the problems to send back.
 func Validate(in Input, env Env, args map[string]any, input []any) (*Verdict, []string, error) {
-	return (&run{in: in, env: env}).validate(args, input)
+	return (&run{in: in, env: env, pass: in.Evidence.Pass}).validate(args, input)
 }

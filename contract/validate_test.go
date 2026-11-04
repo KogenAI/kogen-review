@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/KogenAI/kogen-review/review"
+	"github.com/KogenAI/kogen-verification/verify"
 )
 
 func decodeArgs(t *testing.T, text string) map[string]any {
@@ -120,6 +121,8 @@ func TestValidateChecksTheRequirementsOfAVerdict(t *testing.T) {
 		return `{"verdict":"changes","findings":[` + finding + `],"requirements":` + req + `}`
 	}
 	probeCall := map[string]any{"type": "function_call", "name": "shell", "call_id": "c1", "arguments": `{"command":"sh probe.sh"}`}
+	const namesNothing = `requirement "R1" cites probe "sh probe.sh", which names no file or directory of the current tree: a probe is evidence only when it exercises the candidate; run a focused probe of the requirement with shell on the current tree and cite its exact command`
+	const notRun = `requirement "R1" cites acceptance "a", which did not run on the current tree (not_run): naming a scenario is not evidence; cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run`
 	for i, tc := range []struct {
 		args    string
 		input   []any
@@ -140,8 +143,9 @@ func TestValidateChecksTheRequirementsOfAVerdict(t *testing.T) {
 		{approve(`[` + entry("none", "", "false") + `]`), nil, noEvidence, 0},
 		{approve(`[` + entry("test", "t", "false") + `]`), nil, notMet, 0},
 		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), nil, noProbe, 0},
-		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), []any{probeCall}, "", 1},
-		{approve(`[` + entry("test", "t", "true") + `,` + entry("acceptance", "a", "true") + `]`), nil, "", 2},
+		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), []any{probeCall}, namesNothing, 0},
+		{approve(`[` + entry("test", "t", "true") + `,` + entry("acceptance", "a", "true") + `]`), nil, notRun, 0},
+		{approve(`[` + entry("test", "t", "true") + `]`), nil, "", 1},
 		{changes(blocking("R1 is missing"), `[`+entry("none", "", "false")+`]`), nil, "", 1},
 		{changes(blocking("R1 is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, "", 1},
 		{changes(blocking("it is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, unquoted, 0},
@@ -171,4 +175,78 @@ func TestValidateChecksTheRequirementsOfAVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	deepEq(t, "validate-requirements verdict", *verdict, review.Verdict{Verdict: "approve", Requirements: []review.Requirement{{Requirement: "R1", Evidence: "test", Ref: "t", Met: true}}})
+}
+
+// TestValidateJudgesRequirementEvidenceOnTheCurrentTree pins each outcome of the evidence check
+// of an approval's acceptance and probe entries through review.Validate (item validate-evidence):
+// an acceptance scenario establishes a requirement only when the pass under review is of the
+// current tree and the scenarios the reference cites passed, and a probe only when it names a
+// file or directory of the candidate and its latest run in the input succeeded; a later approval
+// cannot drop a requirement an earlier submission listed; test and changes entries are as before.
+func TestValidateJudgesRequirementEvidenceOnTheCurrentTree(t *testing.T) {
+	t.Parallel()
+	const suffix = "cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run"
+	scenario := func(name, status string) verify.ScenarioResult {
+		return verify.ScenarioResult{Name: name, Status: status, Steps: []verify.StepRecord{{Keyword: "Given ", Text: "step of " + name}}}
+	}
+	acceptance := func(scenarios ...verify.ScenarioResult) *verify.Acceptance {
+		return &verify.Acceptance{Scenarios: scenarios}
+	}
+	approve := func(evidence, ref string) string {
+		return `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"` + evidence + `","ref":"` + ref + `","met":true}]}`
+	}
+	call := func(id, command string) []any {
+		return []any{map[string]any{"type": "function_call", "name": "shell", "call_id": id, "arguments": `{"command":"` + command + `"}`}}
+	}
+	withOutput := func(id, command, output string) []any {
+		return append(call(id, command), map[string]any{"type": "function_call_output", "call_id": id, "output": output})
+	}
+	for _, tc := range []struct {
+		name       string
+		acceptance *verify.Acceptance
+		tree       string // "": the current tree, "other": another
+		args       string
+		input      []any
+		problems   []string // nil accepts
+	}{
+		{"not run", nil, "", approve("acceptance", "S"), nil, []string{`requirement "R1" cites acceptance "S", which did not run on the current tree (not_run): naming a scenario is not evidence; ` + suffix}},
+		{"another tree", acceptance(scenario("S", "passed")), "other", approve("acceptance", "S"), nil, []string{`requirement "R1" cites acceptance "S", whose result is of tree $PASS, not of the current tree $CURRENT: an earlier result is history and does not establish the requirement on the current tree; ` + suffix}},
+		{"no scenario cited", acceptance(scenario("S", "passed")), "", approve("acceptance", "other"), nil, []string{`requirement "R1" cites acceptance "other", which names no scenario of the acceptance result: name the scenario that exercises the requirement, or ` + suffix}},
+		{"cited by step text", acceptance(scenario("S", "passed")), "", approve("acceptance", "step of S"), nil, nil},
+		{"failed", acceptance(scenario("S", "passed"), scenario("T", "failed")), "", approve("acceptance", "S and T"), nil, []string{`requirement "R1" cites acceptance scenario "T", which failed on the current tree: the observed result contradicts met; repair the candidate, or submit changes with a blocking finding that quotes the requirement`}},
+		{"skipped", acceptance(scenario("S", "skipped")), "", approve("acceptance", "S"), nil, []string{`requirement "R1" cites acceptance scenario "S", whose result on the current tree is skipped, not passed: ` + suffix}},
+		{"passed", acceptance(scenario("S", "passed")), "", approve("acceptance", "S"), nil, nil},
+		{"probe naming nothing", nil, "", approve("probe", "echo ok"), withOutput("c1", "echo ok", "exit status: 0\nok"), []string{`requirement "R1" cites probe "echo ok", which names no file or directory of the current tree: a probe is evidence only when it exercises the candidate; run a focused probe of the requirement with shell on the current tree and cite its exact command`}},
+		{"probe that failed", nil, "", approve("probe", "cat app.txt"), withOutput("c1", "cat app.txt", "exit status: 1\n"), []string{`requirement "R1" cites probe "cat app.txt", whose latest run in this review did not succeed (exit status 1): a probe that did not succeed does not show the requirement met; repair the candidate, or submit changes with a blocking finding that quotes the requirement`}},
+		{"probe without output", nil, "", approve("probe", "cat app.txt"), call("c1", "cat app.txt"), []string{`requirement "R1" cites probe "cat app.txt", whose latest run in this review did not succeed (no exit status): a probe that did not succeed does not show the requirement met; repair the candidate, or submit changes with a blocking finding that quotes the requirement`}},
+		{"probe that succeeded", nil, "", approve("probe", "cat app.txt"), withOutput("c1", "cat app.txt", "exit status: 0\ncandidate\n"), nil},
+		{"probe naming a directory", nil, "", approve("probe", "ls ./.kogen/..."), withOutput("c1", "ls ./.kogen/...", "exit status: 0\n"), nil},
+		{"the latest run counts", nil, "", approve("probe", "cat app.txt"), append(withOutput("c1", "cat app.txt", "exit status: 1\n"), withOutput("c2", "cat app.txt", "exit status: 0\n")...), nil},
+		{"test entry", nil, "", approve("test", "TestX"), nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in, h := newReview(t)
+			in.Evidence.Pass.Acceptance = tc.acceptance
+			if tc.tree != "" {
+				in.Evidence.Pass.Tree = otherTree
+			}
+			verdict, problems, err := review.Validate(in, h, decodeArgs(t, tc.args), tc.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, "validate-evidence accepted", verdict != nil, tc.problems == nil)
+			for i, want := range tc.problems {
+				tc.problems[i] = strings.NewReplacer("$PASS", otherTree, "$CURRENT", greenTree).Replace(want)
+			}
+			deepEq(t, "validate-evidence problems", problems, tc.problems)
+		})
+	}
+
+	// An unmet entry of a changes verdict is not judged against the evidence.
+	in, h := newReview(t)
+	verdict, problems, err := review.Validate(in, h, decodeArgs(t, `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"R1 could not be verified"}],"requirements":[{"requirement":"R1","evidence":"acceptance","ref":"S","met":false}]}`), nil)
+	if err != nil || verdict == nil || problems != nil {
+		t.Errorf("validate-evidence: a changes verdict was judged against the evidence: %v %v", problems, err)
+	}
 }

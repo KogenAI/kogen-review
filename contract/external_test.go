@@ -117,7 +117,8 @@ func TestExternalReviewHasNoResume(t *testing.T) {
 
 // TestExternalReviewRequirementsSkipTheProbeCheck pins that an external reviewer's approval citing
 // a probe is accepted, as Kogen cannot see its tool calls, while an approval whose requirement has
-// no evidence is sent back with its problem (item external-requirements).
+// no evidence, or that cites acceptance in a pass that records it not run, is sent back with its
+// problem (items external-requirements, validate-evidence).
 func TestExternalReviewRequirementsSkipTheProbeCheck(t *testing.T) {
 	t.Parallel()
 	in, h := newReview(t)
@@ -137,4 +138,14 @@ func TestExternalReviewRequirementsSkipTheProbeCheck(t *testing.T) {
 	}
 	eq(t, "external-requirements feedback", x.inputs[1].Feedback,
 		`Not a valid verdict: requirement "R1" has no evidence: probe it with shell against the candidate before the verdict. Submit a corrected structured verdict.`)
+
+	in, h = newReview(t)
+	x = &fakeExecutor{t: t, results: []executor.RoundResult{
+		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"acceptance","ref":"S","met":true}]}`),
+		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"sh probe.sh","met":true}]}`)}}
+	if _, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "external-acceptance feedback", x.inputs[1].Feedback,
+		`Not a valid verdict: requirement "R1" cites acceptance "S", which did not run on the current tree (not_run): naming a scenario is not evidence; cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run. Submit a corrected structured verdict.`)
 }
