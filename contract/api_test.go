@@ -62,8 +62,8 @@ var (
 	_ = review.Submitted{Pass: 0, Tree: "", Verdict: "", Findings: []map[string]any{}}
 	_ = review.Verdict{Verdict: "", Findings: []map[string]any{}}
 	_ = review.Part{Part: 0, File: "", Bytes: 0, SHA256: "", From: 0, To: 0, PromptBytes: 0, SessionID: "", Delivered: false, DeliveredRound: 0}
-	_ = func(m review.Material) (int, string, bool, int, string, []map[string]any, []review.Part, int, string) {
-		return m.Authority.Bytes, m.Authority.SHA256, m.Delivered, m.Round, m.Session, m.Parts, m.ReviewParts, m.Source.Bytes, m.Source.SHA256
+	_ = func(m review.Material) (int, string, bool, int, string, []map[string]any, []review.Part, []review.GeneratedFile, int, string) {
+		return m.Authority.Bytes, m.Authority.SHA256, m.Delivered, m.Round, m.Session, m.Parts, m.ReviewParts, m.Generated, m.Source.Bytes, m.Source.SHA256
 	}
 	// The narrow contract kogen-build adapts its state to (build/host.go).
 	_ = review.Input{

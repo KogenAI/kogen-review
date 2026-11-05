@@ -57,6 +57,40 @@ type MaterialSet struct {
 	// not fit one session): the same source and added texts. Not persisted.
 	PartsSource string             `json:"-"`
 	PartsTexts  []MaterialFileText `json:"-"`
+	// layout is how PartsSource is put together, to locate each path's material in it.
+	layout partsLayout
+}
+
+// partsLayout is the parts source as the pieces it is joined from: the source is
+// head + every block + mid + the entries joined by a newline + a final newline.
+type partsLayout struct {
+	// head is everything before the diff text: the check results and the diff heading.
+	head string
+	// blocks are the diff blocks, one per path that has one, in source order.
+	blocks []diffBlock
+	// mid is what follows the diff text, through the intro of the added-files section.
+	mid string
+	// entries is one entry per catalog entry (Files), in catalog order.
+	entries []string
+}
+
+// diffBlock is the diff of one path: file is its index in the catalog.
+type diffBlock struct {
+	file int
+	text string
+}
+
+// source joins the pieces.
+func (l partsLayout) source() string {
+	var b strings.Builder
+	b.WriteString(l.head)
+	for _, blk := range l.blocks {
+		b.WriteString(blk.text)
+	}
+	b.WriteString(l.mid)
+	b.WriteString(strings.Join(l.entries, "\n"))
+	b.WriteString("\n")
+	return b.String()
 }
 
 // MaterialHunkRange is the lines (1-based, inclusive) of one changed hunk: kind "diff" within
@@ -131,7 +165,7 @@ func MaterialOf(in Input) (MaterialSet, error) {
 			i++
 		}
 	}
-	var diffs []string
+	var blocks []diffBlock
 	var texts []MaterialFileText
 	var catalog []map[string]any
 	var parts []string
@@ -155,7 +189,7 @@ func MaterialOf(in Input) (MaterialSet, error) {
 			if err != nil {
 				return MaterialSet{}, err
 			}
-			diffs = append(diffs, d)
+			blocks = append(blocks, diffBlock{file: len(catalog), text: strings.ToValidUTF8(d, "�")})
 		}
 		entry, isThere := current[p]
 		tree, at := c.Start, old
@@ -213,7 +247,6 @@ func MaterialOf(in Input) (MaterialSet, error) {
 			parts = append(parts, heading+" (binary)")
 		}
 	}
-	diff := strings.Join(diffs, "")
 
 	modelText := ""
 	if t, err := readFile(c.Root, project.ModelPath(in.Intent.Slug)); err == nil {
@@ -252,13 +285,18 @@ func MaterialOf(in Input) (MaterialSet, error) {
 		"Acceptance: " + acceptanceRun + ".\n\n"
 
 	results := pass.Results()
-	source := "# Check results of the final pass\n\n" + results + "\n\n" +
-		"# Diff of existing/deleted paths against start HEAD " + short(c.Start) + "\n\n" + diff + "\n" +
-		partsHeading + "\n\n" +
-		"Added files appear here with their mode; changed files have hunks in the diff.\n\n" +
-		strings.Join(parts, "\n") + "\n"
-	source = strings.ToValidUTF8(source, "�")
-	set := MaterialSet{Authority: authority, Source: source, Files: catalog, Checks: results, Texts: texts, PartsSource: source, PartsTexts: texts}
+	layout := partsLayout{
+		head: strings.ToValidUTF8("# Check results of the final pass\n\n"+results+"\n\n"+
+			"# Diff of existing/deleted paths against start HEAD "+short(c.Start)+"\n\n", "�"),
+		blocks: blocks,
+		mid: "\n" + partsHeading + "\n\n" +
+			"Added files appear here with their mode; changed files have hunks in the diff.\n\n",
+	}
+	for _, e := range parts {
+		layout.entries = append(layout.entries, strings.ToValidUTF8(e, "�"))
+	}
+	source := layout.source()
+	set := MaterialSet{Authority: authority, Source: source, Files: catalog, Checks: results, Texts: texts, PartsSource: source, PartsTexts: texts, layout: layout}
 	return set, nil
 }
 

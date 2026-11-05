@@ -60,6 +60,9 @@ type Material struct {
 	// ReviewParts is, when the source is reviewed in parts, one entry per part in order; it is
 	// absent for a review in one session.
 	ReviewParts []Part `json:"review_parts,omitempty"`
+	// Generated is, in a review in parts, one entry per large generated file in path order: the
+	// command that regenerates it and whether its text was summarised or kept (absent: none).
+	Generated []GeneratedFile `json:"generated,omitempty"`
 }
 
 // Part is the evidence of one part of a review in parts: its private file, the source range
@@ -179,6 +182,19 @@ func reviewStop(detail string) *sys.Error {
 func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Role, pass verify.Pass, m MaterialSet, authority string, whole int, dir string) (Result, error) {
 	in, env := v.in, v.env
 	stable := authority + "\n" + reviewPartsTask
+	// A large generated file is checked against its regenerating command before anything is
+	// written or sent: a different output is a blocking finding.
+	generated, err := generatedCandidates(in, pass.Tree, m)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := regenerate(ctx, in, pass.Tree, generated); err != nil {
+		return Result{}, err
+	}
+	if findings := generatedFindings(generated); len(findings) > 0 {
+		return v.generatedStop(ctx, role, findings)
+	}
+	m = m.summarised(generated)
 	blocks, err := materialBlocks(in.Candidate, pass.Tree, m)
 	if err != nil {
 		return Result{}, err
@@ -187,8 +203,12 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 	if err != nil {
 		return Result{}, err
 	}
+	carry, err := carryFor(catalog, dir, in.Number, m)
+	if err != nil {
+		return Result{}, err
+	}
 	c := &reviewParter{
-		source: m.PartsSource, sum: core.HashHex([]byte(m.PartsSource)), checks: m.Checks, catalog: string(catalog), blocks: blocks, ceiling: reviewCeiling,
+		source: m.PartsSource, sum: core.HashHex([]byte(m.PartsSource)), checks: m.Checks, catalog: string(catalog), carry: carry, blocks: blocks, ceiling: reviewCeiling,
 		measure: func(dynamic string) int {
 			return reviewMeasure(x.exec, executor.Brief{Stable: stable, Dynamic: dynamic})
 		},
@@ -196,6 +216,11 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 	ev, err := writeReviewMaterial(dir, in.Number, pass.Tree, stable, m.PartsSource, m.Files)
 	if err != nil {
 		return Result{}, err
+	}
+	if ev.Generated = generatedEvidence(generated); len(ev.Generated) > 0 {
+		if err := ev.persist(dir); err != nil {
+			return Result{}, err
+		}
 	}
 	if !c.hasRoom() {
 		return Result{}, sys.Fail("candidate", "context_budget_exceeded", fmt.Sprintf(
@@ -462,7 +487,11 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 			// Before accepting an approval: the material it rests on was delivered completely in
 			// a completed round of this session and its custody is unchanged.
 			if !ev.delivered(s.part) || ev.session(s.part) != h.SessionID {
-				return Result{}, custodyInvalid("the review material was not completely delivered in a completed round of the reviewer session")
+				detail := "the review material was not completely delivered in a completed round of the reviewer session"
+				if s.part > 0 {
+					detail = fmt.Sprintf("the review material of part %d of %d was not completely delivered in a completed round of the reviewer session", s.part, len(ev.ReviewParts))
+				}
+				return Result{}, custodyInvalid(detail)
 			}
 			if err := ev.check(dir, s.part); err != nil {
 				return Result{}, err

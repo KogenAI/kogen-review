@@ -3,10 +3,14 @@ package review
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
 	"github.com/KogenAI/kogen-loop/tools"
 )
@@ -44,12 +48,90 @@ type reviewCut struct{ From, To int }
 // source range it carries, the check results of the pass the source was cut from, every changed
 // path (the catalog as one JSON line), the section of the paths earlier parts repaired (empty
 // when there are none) and the heading of the slice.
-func reviewPartHeader(k, n, from, to, total int, sum, checks, catalog, repaired string) string {
+func reviewPartHeader(k, n, from, to, total int, sum, checks, changed, repaired string) string {
 	return fmt.Sprintf("# Review part %d of %d\n\n"+
 		"This part carries bytes [%d, %d) of the %d bytes of the candidate's complete review source (SHA-256 %s); the other parts carry the rest, in order.\n\n"+
 		"# Check results of the final pass\n\n%s\n\n"+
 		"# Every changed path\n\n%s\n\n%s"+
-		"# Source part %d of %d\n\n", k, n, from, to, total, sum, checks, catalog, repaired, k, n)
+		"# Source part %d of %d\n\n", k, n, from, to, total, sum, checks, changed, repaired, k, n)
+}
+
+// catalogCarry is the changed-path section of a review whose catalog is longer than
+// MaterialPartBytes: each part carries only the catalog entries of the paths whose material its
+// slice carries, and names the retained file that holds the whole catalog.
+type catalogCarry struct {
+	// file is the retained material file that holds the complete catalog under "parts".
+	file string
+	// entries are the catalog entries as JSON, in catalog order.
+	entries []string
+	// spans are the byte ranges of the source that hold one path's material, ordered by start and
+	// not overlapping: a path's block in the diff and its entry in the added-files section.
+	spans []catalogSpan
+}
+
+// catalogSpan is the byte range [start, end) of the source holding material of catalog entry file.
+type catalogSpan struct{ start, end, file int }
+
+// carryFor is the carry of the catalog of m (catalog is its JSON) for a review whose retained
+// material is in dir, or nil when the catalog is at most MaterialPartBytes and every part carries
+// it whole.
+func carryFor(catalog []byte, dir string, review int, m MaterialSet) (*catalogCarry, error) {
+	if len(catalog) <= MaterialPartBytes {
+		return nil, nil
+	}
+	file, err := filepath.Abs(filepath.Join(dir, fmt.Sprintf("review-%d-material.json", review)))
+	if err != nil {
+		return nil, err
+	}
+	return newCatalogCarry(file, core.NonNil(m.Files), m.layout)
+}
+
+// newCatalogCarry is the carry of catalog (the entries of m.Files) for the source of layout, whose
+// complete catalog is retained in file.
+func newCatalogCarry(file string, catalog []map[string]any, layout partsLayout) (*catalogCarry, error) {
+	c := &catalogCarry{file: file}
+	for _, e := range catalog {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return nil, err
+		}
+		c.entries = append(c.entries, string(b))
+	}
+	at := len(layout.head)
+	for _, blk := range layout.blocks {
+		if len(blk.text) > 0 {
+			c.spans = append(c.spans, catalogSpan{at, at + len(blk.text), blk.file})
+		}
+		at += len(blk.text)
+	}
+	at += len(layout.mid)
+	for i, e := range layout.entries {
+		end := at + len(e) + 1
+		c.spans = append(c.spans, catalogSpan{at, end, i})
+		at = end
+	}
+	return c, nil
+}
+
+// section is the changed-path section of the part carrying source[from:to]: the paths whose
+// material overlaps the slice (start < to && from < end), in catalog order.
+func (c *catalogCarry) section(from, to int) string {
+	first := sort.Search(len(c.spans), func(i int) bool { return c.spans[i].end > from })
+	var files []int
+	for _, sp := range c.spans[first:] {
+		if sp.start >= to {
+			break
+		}
+		files = append(files, sp.file)
+	}
+	slices.Sort(files)
+	files = slices.Compact(files)
+	carried := make([]string, len(files))
+	for i, f := range files {
+		carried[i] = c.entries[f]
+	}
+	return fmt.Sprintf("This review changes %d paths. The complete catalog of every changed path (path, status, origin, rename, mode, Git object, bytes and SHA-256) is retained in %s under \"parts\"; read an entry there when this part does not carry it. "+
+		"The catalog entries of the %d paths whose material this part's source carries:\n[%s]", len(c.entries), c.file, len(files), strings.Join(carried, ","))
 }
 
 // repairedHead is the heading and the instruction of the section naming the paths that reviewers
@@ -107,6 +189,8 @@ type reviewParter struct {
 	sum     string
 	checks  string
 	catalog string
+	// carry, when set, replaces catalog: each part carries the entries of its own paths.
+	carry *catalogCarry
 	// repaired is the section naming the paths earlier parts repaired that the parts cut and
 	// rendered next carry (empty: none).
 	repaired string
@@ -120,7 +204,11 @@ type reviewParter struct {
 }
 
 func (c *reviewParter) header(k, n, from, to int) string {
-	return reviewPartHeader(k, n, from, to, len(c.source), c.sum, c.checks, c.catalog, c.repaired)
+	changed := c.catalog
+	if c.carry != nil {
+		changed = c.carry.section(from, to)
+	}
+	return reviewPartHeader(k, n, from, to, len(c.source), c.sum, c.checks, changed, c.repaired)
 }
 
 // prompt is the complete first prompt of part k of n carrying source[from:to].
