@@ -364,6 +364,22 @@ requirement "R1" cites probe "cat app.txt", whose latest run in this review was 
 		}
 		deepEq(t, "session-listed "+name+" checkpoint", s.Listed, []string{"R1"})
 	}
+
+	// A later approval that respells the listed requirement is accepted, and the first spelling
+	// stays the one listed and recorded.
+	in, h = newReview(t)
+	respelled := `{"verdict":"approve","findings":[],"requirements":[{"requirement":"  r1 ","evidence":"test","ref":"t","met":true}]}`
+	h.answers = []*provider.Response{submitReview(cited), submitReview(respelled)}
+	res, err = review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "session-listed respelled verdict", res.Record.Verdict, "approve")
+	s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "session-listed respelled checkpoint", s.Listed, []string{"R1"})
 }
 
 func TestThirdRequestSequence(t *testing.T) {

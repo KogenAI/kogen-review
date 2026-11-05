@@ -142,8 +142,9 @@ type Session struct {
 	// tree right after the call: what a probe a requirement cites is judged by.
 	ProbeRuns []ProbeRun `json:"probe_runs,omitempty"`
 	// Listed are the requirement texts of every well-formed requirements array a submission of
-	// this review gave, accepted or refused, each once in the order first listed: a later
-	// approval cannot drop one.
+	// this review gave, accepted or refused, one text per identity (the text without leading and
+	// trailing whitespace, each run of whitespace as one space, letter case ignored) in its first
+	// spelling and in the order first listed: a later approval cannot drop one.
 	Listed            []string `json:"listed_requirements,omitempty"`
 	RepairRounds      int      `json:"repair_rounds,omitempty"`
 	FailureIdentities []string `json:"failure_identities,omitempty"`
@@ -1071,7 +1072,10 @@ const requirementSuffix = "cite a probe you ran with shell on the current tree t
 // and named a file or directory of the candidate, and an acceptance scenario must have passed in
 // the pass under review of the current tree; an approval keeps every requirement an earlier
 // submission of this review listed. A changes verdict quotes each unmet requirement in a blocking
-// finding.
+// finding. A requirement is identified by its text without leading and trailing whitespace, each
+// run of whitespace as one space and letter case ignored: entries are grouped by identity, the
+// first spelling the review listed is the stored text, a group whose entries differ in evidence,
+// ref or met is refused as listed twice, and the quote check matches under the same identity.
 func (r *run) requirements(args map[string]any, verdict string, findings []map[string]any, input []any) ([]Requirement, []string, error) {
 	raw, present := args["requirements"]
 	if !present || raw == nil {
@@ -1096,15 +1100,36 @@ func (r *run) requirements(args map[string]any, verdict string, findings []map[s
 		out = append(out, Requirement{Requirement: text, Evidence: evidence, Ref: ref, Met: met})
 	}
 	listed := slices.Clone(r.sess.Listed)
+	var groups []Requirement
+	var conflicts []bool
+	index := map[string]int{}
 	for _, q := range out {
-		if !slices.Contains(r.sess.Listed, q.Requirement) {
-			r.sess.Listed = append(r.sess.Listed, q.Requirement)
+		id := identity(q.Requirement)
+		i, seen := index[id]
+		if !seen {
+			text := q.Requirement
+			if at := slices.IndexFunc(listed, func(l string) bool { return identity(l) == id }); at >= 0 {
+				text = listed[at]
+			} else {
+				r.sess.Listed = append(r.sess.Listed, text)
+			}
+			index[id] = len(groups)
+			groups = append(groups, Requirement{Requirement: text, Evidence: q.Evidence, Ref: q.Ref, Met: q.Met})
+			conflicts = append(conflicts, false)
+			continue
+		}
+		if first := groups[i]; q.Evidence != first.Evidence || q.Ref != first.Ref || q.Met != first.Met {
+			conflicts[i] = true
 		}
 	}
 	e := &evidenceCheck{r: r}
 	var problems []string
-	for _, q := range out {
+	for gi, q := range groups {
 		quoted := "requirement \"" + q.Requirement + "\""
+		if conflicts[gi] {
+			problems = append(problems, quoted+" is listed twice: list each requirement once in requirements, with one evidence, ref and met")
+			continue
+		}
 		switch {
 		case verdict == "approve" && q.Evidence == "none":
 			problems = append(problems, quoted+" has no evidence: probe it with shell against the candidate before the verdict")
@@ -1132,22 +1157,24 @@ func (r *run) requirements(args map[string]any, verdict string, findings []map[s
 			}
 		}
 	}
-	kept := make([]string, 0, len(out))
-	for _, q := range out {
-		kept = append(kept, q.Requirement)
-	}
-	return out, append(problems, missing(verdict, listed, kept)...), nil
+	return groups, append(problems, missing(verdict, listed, index)...), nil
 }
 
-// missing lists, for an approval, the requirements an earlier submission listed that kept does
-// not have.
-func missing(verdict string, listed, kept []string) []string {
+// identity is what makes two requirement texts the same requirement: the text without leading and
+// trailing whitespace, each run of whitespace as one space, and letter case ignored.
+func identity(text string) string {
+	return strings.ToLower(strings.Join(strings.Fields(text), " "))
+}
+
+// missing lists, for an approval, the requirements an earlier submission listed whose identity is
+// not in kept.
+func missing(verdict string, listed []string, kept map[string]int) []string {
 	if verdict != "approve" {
 		return nil
 	}
 	var problems []string
 	for _, text := range listed {
-		if !slices.Contains(kept, text) {
+		if _, ok := kept[identity(text)]; !ok {
 			problems = append(problems, "requirement \""+text+"\" was listed by an earlier submission of this review and is missing: keep every requirement in requirements, with evidence observed on the current tree")
 		}
 	}
@@ -1361,7 +1388,7 @@ func (r *run) ran(command string, input []any) bool {
 // quotes reports whether a blocking finding's message contains text.
 func quotes(findings []map[string]any, text string) bool {
 	for _, f := range findings {
-		if message, _ := f["message"].(string); f["severity"] == "blocking" && strings.Contains(message, text) {
+		if message, _ := f["message"].(string); f["severity"] == "blocking" && strings.Contains(identity(message), identity(text)) {
 			return true
 		}
 	}

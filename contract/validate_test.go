@@ -167,7 +167,7 @@ func TestValidateChecksTheRequirementsOfAVerdict(t *testing.T) {
 		{approve(`[` + entry("test", "t", "false") + `]`), nil, notMet, 0},
 		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), nil, noProbe, 0},
 		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), []any{probeCall}, namesNothing, 0},
-		{approve(`[` + entry("test", "t", "true") + `,` + entry("acceptance", "a", "true") + `]`), nil, notRun, 0},
+		{approve(`[` + entry("acceptance", "a", "true") + `]`), nil, notRun, 0},
 		{approve(`[` + entry("test", "t", "true") + `]`), nil, "", 1},
 		{changes(blocking("R1 is missing"), `[`+entry("none", "", "false")+`]`), nil, "", 1},
 		{changes(blocking("R1 is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, "", 1},
@@ -271,5 +271,66 @@ func TestValidateJudgesRequirementEvidenceOnTheCurrentTree(t *testing.T) {
 	verdict, problems, err := review.Validate(in, h, decodeArgs(t, `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"R1 could not be verified"}],"requirements":[{"requirement":"R1","evidence":"acceptance","ref":"S","met":false}]}`), nil)
 	if err != nil || verdict == nil || problems != nil {
 		t.Errorf("validate-evidence: a changes verdict was judged against the evidence: %v %v", problems, err)
+	}
+}
+
+// TestValidateIdentifiesRequirementsByNormalizedText pins the identity of a requirement through
+// review.Validate (item validate-requirements): its text without leading and trailing whitespace,
+// each run of whitespace as one space, letter case ignored. Entries of one identity are kept once
+// with the first spelling when they agree and refused as listed twice when they differ in
+// evidence, ref or met; requirements that differ in words stay separate; a changes verdict's
+// blocking finding quotes a requirement under the same identity.
+func TestValidateIdentifiesRequirementsByNormalizedText(t *testing.T) {
+	t.Parallel()
+	const twice = `requirement "R1" is listed twice: list each requirement once in requirements, with one evidence, ref and met`
+	const unquoted = `requirement "R1" is not met: a changes verdict needs a blocking finding whose message quotes it`
+	entry := func(text, evidence, ref, met string) string {
+		return `{"requirement":"` + text + `","evidence":"` + evidence + `","ref":"` + ref + `","met":` + met + `}`
+	}
+	blocking := func(message string) string {
+		return `{"path":"app.txt","line":1,"severity":"blocking","message":"` + message + `"}`
+	}
+	approve := func(reqs ...string) string {
+		return `{"verdict":"approve","findings":[],"requirements":[` + strings.Join(reqs, ",") + `]}`
+	}
+	changes := func(message string, reqs ...string) string {
+		return `{"verdict":"changes","findings":[` + blocking(message) + `],"requirements":[` + strings.Join(reqs, ",") + `]}`
+	}
+	for _, tc := range []struct {
+		name    string
+		args    string
+		problem string // "" accepts
+		texts   []string
+	}{
+		{"respelled entries agree", approve(entry("R1", "test", "t", "true"), entry(" r1 ", "test", "t", "true")), "", []string{"R1"}},
+		{"whitespace runs agree", approve(entry("a  b", "test", "t", "true"), entry("A\\tB", "test", "t", "true")), "", []string{"a  b"}},
+		{"differ in met, approve", approve(entry("R1", "test", "t", "true"), entry(" r1 ", "test", "t", "false")), twice, nil},
+		{"differ in evidence, approve", approve(entry("R1", "test", "t", "true"), entry("r1", "acceptance", "t", "true")), twice, nil},
+		{"differ in ref, approve", approve(entry("R1", "test", "t", "true"), entry("r1", "test", "u", "true")), twice, nil},
+		{"ref compares exactly", approve(entry("R1", "test", "T", "true"), entry("r1", "test", "t", "true")), twice, nil},
+		{"differ in met, changes", changes("R1 fails", entry("R1", "test", "t", "true"), entry("r1", "test", "t", "false")), twice, nil},
+		{"differ in ref, changes", changes("R1 fails", entry("R1", "test", "t", "false"), entry("r1", "test", "u", "false")), twice, nil},
+		{"differ in evidence, changes", changes("R1 fails", entry("R1", "test", "t", "false"), entry("r1", "none", "", "false")), twice, nil},
+		{"differ in words", approve(entry("prints a total", "test", "t", "true"), entry("prints a total in bytes", "test", "t", "true")), "", []string{"prints a total", "prints a total in bytes"}},
+		{"quote under identity", changes("so  r1 FAILS here", entry("R1", "test", "t", "false")), "", []string{"R1"}},
+		{"quote differs in words", changes("it fails", entry("R1", "test", "t", "false")), unquoted, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in, h := newReview(t)
+			verdict, problems, err := review.Validate(in, h, decodeArgs(t, tc.args), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, "validate-requirements identity problem "+tc.name, strings.Join(problems, "; "), tc.problem)
+			if tc.problem != "" {
+				return
+			}
+			var texts []string
+			for _, q := range verdict.Requirements {
+				texts = append(texts, q.Requirement)
+			}
+			deepEq(t, "validate-requirements identity entries "+tc.name, texts, tc.texts)
+		})
 	}
 }
