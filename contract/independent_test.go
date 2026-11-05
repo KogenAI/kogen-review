@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -608,4 +609,45 @@ func TestCallsAfterASubmissionAreAnsweredByItsOutcome(t *testing.T) {
 	const ignored = "ignored: the review already has a verdict"
 	deepEq(t, "submit-then-calls ignored outputs", last, []any{"accepted", ignored, ignored, ignored})
 	eq(t, "submit-then-calls ignored probes", len(s.Probes), 0)
+}
+
+// TestIndependentReviewHandsOnCollapsedBoundedFindings pins that the stored and handed-on verdict
+// is the collapsed, cut one (item independent-findings): two copies of one blocking finding plus
+// 60 distinct ones end in candidate/review_blocked with 50 review lines, and the Result record,
+// the saved session verdict and review-1.json hold the same 50 findings and the dropped counts.
+func TestIndependentReviewHandsOnCollapsedBoundedFindings(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	var items []string
+	add := func(i int) {
+		items = append(items, fmt.Sprintf(`{"path":"app.txt","line":%d,"severity":"blocking","message":"defect %d"}`, i, i))
+	}
+	add(0)
+	add(0)
+	for i := 1; i <= 60; i++ {
+		add(i)
+	}
+	h.answers = []*provider.Response{submitReview(`{"verdict":"changes","findings":[` + strings.Join(items, ",") + `]}`)}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	e := wantError(t, "independent-findings", err, "candidate", "review_blocked")
+	var want []string
+	for i := 0; i < 50; i++ {
+		want = append(want, fmt.Sprintf("review: app.txt:%d: defect %d", i, i))
+	}
+	deepEq(t, "independent-findings lines", e.Lines, want)
+	eq(t, "independent-findings record", len(res.Record.Findings), 50)
+	s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionFindings, _ := json.Marshal(s.Verdict.Findings)
+	recordFindings, _ := json.Marshal(res.Record.Findings)
+	eq(t, "independent-findings session findings", string(sessionFindings), string(recordFindings))
+	deepEq(t, "independent-findings session dropped", s.Verdict.Dropped, &review.Dropped{Blocking: 11})
+	file := readJSON(t, filepath.Join(h.dir, review.File(1)))
+	eq(t, "independent-findings file findings", len(file["findings"].([]any)), 50)
+	deepEq(t, "independent-findings file dropped", file["dropped"], map[string]any{"blocking": float64(11), "note": float64(0)})
+	fileFindings, _ := json.Marshal(file["findings"])
+	eq(t, "independent-findings file findings bytes", string(fileFindings), string(recordFindings))
+	eq(t, "independent-findings recorded", len(h.last.Findings), 50)
 }

@@ -334,3 +334,89 @@ func TestValidateIdentifiesRequirementsByNormalizedText(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateCollapsesDuplicateFindings pins that identical findings (same clean path, line,
+// severity and message after trimming) are kept once in first-submitted order with the first
+// copy's fields, that at most 50 findings of each severity are kept in submitted order with the
+// dropped counts recorded as Verdict.Dropped (absent when nothing was dropped), and that a
+// collapse never leaves a changes verdict without its blocking finding (item validate-findings).
+func TestValidateCollapsesDuplicateFindings(t *testing.T) {
+	t.Parallel()
+	finding := func(path string, line int, severity, message string) string {
+		b, _ := json.Marshal(map[string]any{"path": path, "line": line, "severity": severity, "message": message})
+		return string(b)
+	}
+	many := func(severity string, n int) string {
+		var items []string
+		for i := 1; i <= n; i++ {
+			items = append(items, finding("app.txt", i, severity, fmt.Sprintf("finding %d", i)))
+		}
+		return strings.Join(items, ",")
+	}
+	for _, tc := range []struct {
+		name     string
+		verdict  string
+		findings string
+		lines    []int
+		messages []string
+		dropped  *review.Dropped
+	}{
+		{"copies", "changes", strings.Join([]string{
+			finding("app.txt", 1, "blocking", "m"), finding("./app.txt", 1, "blocking", "m"),
+			finding("dir/../app.txt", 1, "blocking", " \tm \n"), finding("app.txt", 1, "blocking", "m")}, ","),
+			[]int{1}, []string{"m"}, nil},
+		{"order", "changes", strings.Join([]string{
+			finding("app.txt", 2, "blocking", "b"), finding("app.txt", 1, "blocking", "a"),
+			finding("app.txt", 2, "blocking", "b"), finding("app.txt", 3, "note", "n"), finding("app.txt", 1, "blocking", " a")}, ","),
+			[]int{2, 1, 3}, []string{"b", "a", "n"}, nil},
+		{"line and severity differ", "changes", strings.Join([]string{
+			finding("app.txt", 1, "blocking", "m"), finding("app.txt", 2, "blocking", "m"), finding("app.txt", 1, "note", "m")}, ","),
+			[]int{1, 2, 1}, []string{"m", "m", "m"}, nil},
+		{"approve notes", "approve", finding("app.txt", 1, "note", "n") + "," + finding("app.txt", 1, "note", "n"), []int{1}, []string{"n"}, nil},
+		{"50 blocking", "changes", many("blocking", 50), nil, nil, nil},
+		{"51 notes", "approve", many("note", 51), nil, nil, &review.Dropped{Note: 1}},
+		{"60 blocking", "changes", many("blocking", 60), nil, nil, &review.Dropped{Blocking: 10}},
+		{"duplicates are not dropped", "changes", many("blocking", 50) + "," + many("blocking", 50), nil, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in, h := newReview(t)
+			args := decodeArgs(t, `{"verdict":"`+tc.verdict+`","findings":[`+tc.findings+`]}`)
+			verdict, problems, err := review.Validate(in, h, args, nil)
+			if err != nil || verdict == nil {
+				t.Fatalf("validate-findings %s: not accepted: %v %v", tc.name, problems, err)
+			}
+			deepEq(t, "validate-findings dropped "+tc.name, verdict.Dropped, tc.dropped)
+			b, err := json.Marshal(verdict)
+			if err != nil {
+				t.Fatal(err)
+			}
+			eq(t, "validate-findings dropped key "+tc.name, strings.Contains(string(b), `"dropped"`), tc.dropped != nil)
+			if tc.dropped != nil {
+				want := fmt.Sprintf(`"dropped":{"blocking":%d,"note":%d}`, tc.dropped.Blocking, tc.dropped.Note)
+				eq(t, "validate-findings dropped json "+tc.name, strings.Contains(string(b), want), true)
+			}
+			if tc.lines == nil {
+				// 50 kept, the first fifty submitted, in order.
+				eq(t, "validate-findings count "+tc.name, len(verdict.Findings), 50)
+				for i, f := range verdict.Findings {
+					eq(t, "validate-findings message "+tc.name, fmt.Sprint(f["message"]), fmt.Sprintf("finding %d", i+1))
+				}
+				return
+			}
+			eq(t, "validate-findings count "+tc.name, len(verdict.Findings), len(tc.lines))
+			for i, f := range verdict.Findings {
+				eq(t, "validate-findings line "+tc.name, fmt.Sprint(f["line"]), fmt.Sprint(tc.lines[i]))
+				eq(t, "validate-findings message "+tc.name, strings.TrimSpace(fmt.Sprint(f["message"])), tc.messages[i])
+				eq(t, "validate-findings path "+tc.name, fmt.Sprint(f["path"]), "app.txt")
+			}
+		})
+	}
+	// The first copy is kept as submitted: its message is not trimmed.
+	in, h := newReview(t)
+	verdict, _, err := review.Validate(in, h, decodeArgs(t, `{"verdict":"changes","findings":[`+finding("app.txt", 1, "blocking", " m ")+`,`+finding("app.txt", 1, "blocking", "m")+`]}`), nil)
+	if err != nil || verdict == nil {
+		t.Fatal("validate-findings first copy: not accepted")
+	}
+	eq(t, "validate-findings first copy message", fmt.Sprint(verdict.Findings[0]["message"]), " m ")
+}

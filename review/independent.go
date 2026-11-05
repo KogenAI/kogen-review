@@ -60,10 +60,23 @@ var ToolNames = []string{"read_file", "view_image", "list_files", "search_text",
 type Verdict struct {
 	Verdict  string           `json:"verdict"`
 	Findings []map[string]any `json:"findings"`
+	// Dropped counts the findings the per-severity cut (maxFindings) dropped; nil when it
+	// dropped none.
+	Dropped *Dropped `json:"dropped,omitempty"`
 	// Requirements is the reviewer's evidence for each requirement of the approved Intent (none
 	// when the submission had no requirements).
 	Requirements []Requirement `json:"requirements,omitempty"`
 }
+
+// Dropped is the number of blocking and of note findings a verdict's cut dropped.
+type Dropped struct {
+	Blocking int `json:"blocking"`
+	Note     int `json:"note"`
+}
+
+// maxFindings is the most findings of each severity a verdict keeps: at most this many
+// blocking and this many note findings; later ones are dropped in submitted order.
+const maxFindings = 50
 
 // Requirement is one entry of a verdict's requirements: a requirement of the approved Intent,
 // the kind of evidence for it (test, acceptance, probe or none), its reference (the test or
@@ -491,11 +504,15 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		}
 	}
 	env.Progress(fmt.Sprintf("kogen: review %d: %s, %d blocking", n, verdict.Verdict, blocking))
-	if err := env.Write(File(n), r.withEnvironment(map[string]any{
+	file := map[string]any{
 		"model": r.sess.Role.Model, "effort": r.sess.Role.Effort, "usage": r.sess.Usage,
 		"verdict": verdict.Verdict, "findings": findings, "tree": tree, "attempts": attempts,
 		"requirements": core.NonNil(verdict.Requirements),
-	})); err != nil {
+	}
+	if verdict.Dropped != nil {
+		file["dropped"] = verdict.Dropped
+	}
+	if err := env.Write(File(n), r.withEnvironment(file)); err != nil {
 		return Result{}, false, err
 	}
 	env.Event(map[string]any{
@@ -999,6 +1016,7 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	case verdict == "approve" && blocking > 0:
 		problems = append(problems, "an approve verdict cannot have blocking findings")
 	}
+	findings = collapseFindings(findings)
 	requirements, reqProblems, err := r.requirements(args, verdict, findings, input)
 	if err != nil {
 		return nil, nil, err
@@ -1027,7 +1045,60 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	if problems != nil {
 		return nil, problems, nil
 	}
-	return &Verdict{Verdict: verdict, Findings: findings, Requirements: requirements}, nil, nil
+	findings, dropped := cutFindings(findings)
+	return &Verdict{Verdict: verdict, Findings: findings, Dropped: dropped, Requirements: requirements}, nil, nil
+}
+
+// collapseFindings keeps the first of each group of findings with the same path, line, severity
+// and message (compared after trimming whitespace), in submitted order.
+func collapseFindings(findings []map[string]any) []map[string]any {
+	type key struct {
+		path, line, severity, message string
+	}
+	seen := map[key]bool{}
+	var kept []map[string]any
+	for _, f := range findings {
+		line := fmt.Sprint(f["line"])
+		if n, ok := f["line"].(json.Number); ok {
+			if v, err := n.Int64(); err == nil {
+				line = strconv.FormatInt(v, 10)
+			}
+		}
+		path, _ := f["path"].(string)
+		severity, _ := f["severity"].(string)
+		message, _ := f["message"].(string)
+		k := key{path, line, severity, strings.TrimSpace(message)}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		kept = append(kept, f)
+	}
+	return kept
+}
+
+// cutFindings keeps the first maxFindings findings of each severity, in order, and reports how
+// many of each it dropped (nil when none).
+func cutFindings(findings []map[string]any) ([]map[string]any, *Dropped) {
+	var kept []map[string]any
+	var dropped Dropped
+	blocking, note := 0, 0
+	for _, f := range findings {
+		count, lost := &note, &dropped.Note
+		if f["severity"] == "blocking" {
+			count, lost = &blocking, &dropped.Blocking
+		}
+		if *count >= maxFindings {
+			*lost++
+			continue
+		}
+		*count++
+		kept = append(kept, f)
+	}
+	if dropped == (Dropped{}) {
+		return kept, nil
+	}
+	return kept, &dropped
 }
 
 // findingPath reports the clean slash form of a finding's path when it names a file inside the
