@@ -210,3 +210,108 @@ func (s sizedExec) FirstPromptBytes(role string, brief executor.Brief) int {
 	}
 	return 1000 + len(brief.Stable) + len(brief.Dynamic)
 }
+
+// pathsOf is n paths of exactly size bytes, in byte order.
+func pathsOf(n, size int) []string {
+	out := make([]string, n)
+	for i := range out {
+		p := strconv.Itoa(1000000 + i)
+		out[i] = p + strings.Repeat("p", size-len(p))
+	}
+	return out
+}
+
+// The section is the heading, the instruction and the list as JSON, each followed by a blank
+// line; no paths is no section.
+func TestRepairedSectionRendering(t *testing.T) {
+	section, shown, more := repairedSection([]string{"a.txt", "d/new.txt"})
+	want := "# Paths repaired by earlier parts\n\n" +
+		"Reviewers of earlier parts repaired these paths, and Kogen verified the repairs, after the review source was cut: what the review source shows of them is stale or missing. Read each of them from the checkout.\n\n" +
+		"[\"a.txt\",\"d/new.txt\"]\n\n"
+	if section != want || len(shown) != 2 || more != 0 {
+		t.Fatalf("section %q shown %v more %d", section, shown, more)
+	}
+	if section, shown, more := repairedSection(nil); section != "" || shown != nil || more != 0 {
+		t.Fatalf("no paths: %q %v %d", section, shown, more)
+	}
+}
+
+// A section of exactly 3000 bytes shows every path; one more byte cuts with the count, and a
+// list that fits no path is the empty prefix.
+func TestRepairedSectionCut(t *testing.T) {
+	overhead := len(repairedHead) + len("[]\n\n")
+	// k paths of size bytes: the list is k*(size+2)+(k-1) bytes plus its brackets.
+	const k = 5
+	size := (repairedSectionBytes-overhead-(k-1))/k - 2
+	paths := pathsOf(k, size)
+	section, shown, more := repairedSection(paths)
+	if len(section) > repairedSectionBytes || more != 0 || len(shown) != k {
+		t.Fatalf("%d bytes, shown %d, more %d", len(section), len(shown), more)
+	}
+	// Grow the last path to make the section exactly 3000 bytes, then one byte more.
+	paths[k-1] += strings.Repeat("p", repairedSectionBytes-len(section))
+	section, shown, more = repairedSection(paths)
+	if len(section) != repairedSectionBytes || more != 0 || len(shown) != k {
+		t.Fatalf("exact: %d bytes, shown %d, more %d", len(section), len(shown), more)
+	}
+	paths[k-1] += "p"
+	section, shown, more = repairedSection(paths)
+	if len(section) > repairedSectionBytes || more != 1 || len(shown) != k-1 || !strings.HasSuffix(section, " and 1 more\n\n") {
+		t.Fatalf("one byte over: %d bytes, shown %d, more %d", len(section), len(shown), more)
+	}
+	section, shown, more = repairedSection([]string{strings.Repeat("x", repairedSectionBytes), "y"})
+	if len(shown) != 0 || more != 2 || !strings.HasSuffix(section, "[] and 2 more\n\n") {
+		t.Fatalf("empty prefix: %q %v %d", section, shown, more)
+	}
+	// A whole list of exactly 3000 bytes is shown whole even when its last path is shorter than
+	// the " and 1 more" a prefix would need; one byte more shows the empty prefix.
+	long := strings.Repeat("x", repairedSectionBytes-len(repairedHead)-len(`["",""]`)-len("y")-len("\n\n"))
+	section, shown, more = repairedSection([]string{long, "y"})
+	if len(section) != repairedSectionBytes || len(shown) != 2 || more != 0 {
+		t.Fatalf("whole list of exactly the cap: %d bytes, shown %d, more %d", len(section), len(shown), more)
+	}
+	section, shown, more = repairedSection([]string{long + "x", "y"})
+	if len(section) > repairedSectionBytes || len(shown) != 0 || more != 2 {
+		t.Fatalf("whole list one byte over the cap: %d bytes, shown %d, more %d", len(section), len(shown), more)
+	}
+	// 2200 paths of 240 bytes show the first 11 and 2189 more in a 2935-byte section.
+	section, shown, more = repairedSection(pathsOf(2200, 240))
+	if len(shown) != 11 || more != 2189 || len(section) != 2935 || !strings.Contains(section, " and 2189 more\n\n") {
+		t.Fatalf("shown %d more %d bytes %d", len(shown), more, len(section))
+	}
+}
+
+// Cutting again from a part numbers the parts on from it, keeps the slices consecutive over the
+// rest of the source and every complete prompt within the ceiling, with the section in each.
+func TestReviewPartsRecutFromAPart(t *testing.T) {
+	c := testParter(lines(2000, "x"), nil, 20000, 900)
+	cuts := mustCut(t, c)
+	if len(cuts) < 3 {
+		t.Fatalf("parts %v", cuts)
+	}
+	section, _, _ := repairedSection([]string{"a.txt"})
+	c.repaired = section
+	tail, err := c.cutFrom(2, cuts[1].From)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := append(append([]reviewCut{}, cuts[:1]...), tail...)
+	if all[1].From != cuts[0].To || all[len(all)-1].To != len(c.source) || len(tail) < len(cuts)-1 {
+		t.Fatalf("cuts %v recut %v", cuts, tail)
+	}
+	for i, text := range c.textsFrom(2, tail) {
+		n := 1 + len(tail)
+		if !strings.HasPrefix(text, "# Review part "+strconv.Itoa(i+2)+" of "+strconv.Itoa(n)+"\n") {
+			t.Fatalf("part %d text starts %q", i+2, text[:30])
+		}
+		if !strings.Contains(text, "# Every changed path\n\n"+c.catalog+"\n\n"+section+"# Source part "+strconv.Itoa(i+2)+" of "+strconv.Itoa(n)+"\n\n") {
+			t.Fatalf("part %d has no section before its source heading", i+2)
+		}
+		if got := c.measure(text); got > c.ceiling {
+			t.Fatalf("part %d prompt %d over the ceiling", i+2, got)
+		}
+		if i > 0 && tail[i].From != tail[i-1].To {
+			t.Fatalf("not consecutive: %v", tail)
+		}
+	}
+}

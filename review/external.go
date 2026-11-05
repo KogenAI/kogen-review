@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -64,16 +65,20 @@ type Material struct {
 // Part is the evidence of one part of a review in parts: its private file, the source range
 // it carries, the exact length of its complete first prompt and its own session and delivery.
 type Part struct {
-	Part           int    `json:"part"`
-	File           string `json:"file"`
-	Bytes          int    `json:"bytes"`
-	SHA256         string `json:"sha256"`
-	From           int    `json:"from"`
-	To             int    `json:"to"`
-	PromptBytes    int    `json:"prompt_bytes"`
-	SessionID      string `json:"session_id"`
-	Delivered      bool   `json:"delivered"`
-	DeliveredRound int    `json:"delivered_round,omitempty"`
+	Part        int    `json:"part"`
+	File        string `json:"file"`
+	Bytes       int    `json:"bytes"`
+	SHA256      string `json:"sha256"`
+	From        int    `json:"from"`
+	To          int    `json:"to"`
+	PromptBytes int    `json:"prompt_bytes"`
+	// RepairedPaths and RepairedMore are the list of paths earlier parts repaired that this part's
+	// section shows, in order, and the number it leaves out (absent: no section, or none left out).
+	RepairedPaths  []string `json:"repaired_paths,omitempty"`
+	RepairedMore   int      `json:"repaired_more,omitempty"`
+	SessionID      string   `json:"session_id"`
+	Delivered      bool     `json:"delivered"`
+	DeliveredRound int      `json:"delivered_round,omitempty"`
 }
 
 type fileEvidence struct {
@@ -205,17 +210,11 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 	texts := c.texts(cuts)
 	// Every part is written and its complete prompt measured before the first is sent.
 	for i, text := range texts {
-		prompt := reviewMeasure(x.exec, executor.Brief{Stable: stable, Dynamic: text})
-		if prompt > reviewCeiling {
-			return Result{}, reviewStop(fmt.Sprintf("the prompt of part %d of %d for executor %s is %d bytes, over the inclusive %d-byte ceiling", i+1, len(texts), x.desc.Name, prompt, reviewCeiling))
-		}
-		name := fmt.Sprintf("review-%d-part-%d.txt", in.Number, i+1)
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+		part, err := x.stagePart(stable, dir, in.Number, i+1, len(texts), text, cuts[i], nil, 0)
+		if err != nil {
 			return Result{}, err
 		}
-		ev.ReviewParts = append(ev.ReviewParts, Part{
-			Part: i + 1, File: name, Bytes: len(text), SHA256: core.HashHex([]byte(text)), From: cuts[i].From, To: cuts[i].To, PromptBytes: prompt,
-		})
+		ev.ReviewParts = append(ev.ReviewParts, part)
 	}
 	if err := ev.persist(dir); err != nil {
 		return Result{}, err
@@ -229,7 +228,23 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 	env.Progress(fmt.Sprintf("kogen: reviewing (review %d) in %d %s: the complete review prompt would be %d bytes, over the %d-byte ceiling", in.Number, n, noun, whole, reviewCeiling))
 
 	current, repairs := pass, 0
+	// rendered is the list of repaired paths the parts not yet sent were last rendered with.
+	var rendered []string
 	for k := 1; k <= n; k++ {
+		if k > 1 {
+			list, err := in.Candidate.Repo.Changed(pass.Tree, current.Tree)
+			if err != nil {
+				return Result{}, err
+			}
+			slices.Sort(list)
+			list = slices.Compact(list)
+			if !slices.Equal(list, rendered) {
+				if cuts, texts, err = x.recut(c, stable, dir, ev, k, cuts, list); err != nil {
+					return Result{}, err
+				}
+				rendered, n = list, len(cuts)
+			}
+		}
 		env.Progress(fmt.Sprintf("kogen: reviewing (review %d, part %d of %d)", in.Number, k, n))
 		approved, err := x.session(ctx, v, role, ev, dir, reviewSend{
 			brief: executor.Brief{Stable: stable, Dynamic: texts[k-1]}, sessionDir: filepath.Join(dir, fmt.Sprintf("part-%d", k)),
@@ -252,6 +267,59 @@ func (x External) reviewInParts(ctx context.Context, v *xreview, role project.Ro
 		current = approved.Pass
 	}
 	return Result{}, nil
+}
+
+// stagePart measures the complete first prompt of part k of n and retains its text privately. The
+// prompt over the ceiling stops before anything is sent.
+func (x External) stagePart(stable, dir string, review, k, n int, text string, cut reviewCut, shown []string, more int) (Part, error) {
+	prompt := reviewMeasure(x.exec, executor.Brief{Stable: stable, Dynamic: text})
+	if prompt > reviewCeiling {
+		return Part{}, reviewStop(fmt.Sprintf("the prompt of part %d of %d for executor %s is %d bytes, over the inclusive %d-byte ceiling", k, n, x.desc.Name, prompt, reviewCeiling))
+	}
+	name := fmt.Sprintf("review-%d-part-%d.txt", review, k)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+		return Part{}, err
+	}
+	return Part{
+		Part: k, File: name, Bytes: len(text), SHA256: core.HashHex([]byte(text)), From: cut.From, To: cut.To, PromptBytes: prompt,
+		RepairedPaths: shown, RepairedMore: more,
+	}, nil
+}
+
+// recut cuts the source from the start of part k on again, the parts not yet sent carrying the
+// section for list, the paths earlier parts repaired. Every part's text is written and its prompt
+// measured before part k is sent; their evidence replaces the entries of those numbers, the
+// entries end at the new count and the files of numbers beyond it are removed. Parts already sent
+// and the source are unchanged.
+func (x External) recut(c *reviewParter, stable, dir string, ev *Material, k int, cuts []reviewCut, list []string) ([]reviewCut, []string, error) {
+	section, shown, more := repairedSection(list)
+	c.repaired = section
+	tail, err := c.cutFrom(k, cuts[k-1].From)
+	if err != nil {
+		return nil, nil, reviewStop("the source cannot be cut into parts that fit the inclusive " + strconv.Itoa(reviewCeiling) + "-byte ceiling: " + err.Error())
+	}
+	n := k - 1 + len(tail)
+	tailTexts := c.textsFrom(k, tail)
+	parts := slices.Clone(ev.ReviewParts[:k-1])
+	for i, text := range tailTexts {
+		part, err := x.stagePart(stable, dir, ev.Review, k+i, n, text, tail[i], shown, more)
+		if err != nil {
+			return nil, nil, err
+		}
+		parts = append(parts, part)
+	}
+	for i := n + 1; i <= len(ev.ReviewParts); i++ {
+		if err := os.Remove(filepath.Join(dir, ev.ReviewParts[i-1].File)); err != nil && !os.IsNotExist(err) {
+			return nil, nil, err
+		}
+	}
+	ev.ReviewParts = parts
+	if err := ev.persist(dir); err != nil {
+		return nil, nil, err
+	}
+	// The texts before part k are never read again; keep the slices aligned with the part numbers.
+	texts := make([]string, k-1, n)
+	return append(slices.Clone(cuts[:k-1]), tail...), append(texts, tailTexts...), nil
 }
 
 // session is one fresh session of the external review (the whole review, or one part): the

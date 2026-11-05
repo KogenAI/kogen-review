@@ -146,7 +146,7 @@ func TestMaterialEvidenceJSON(t *testing.T) {
 	text := `{"review":2,"tree":"t","authority":{"file":"review-2-authority.txt","bytes":5,"sha256":"aa"},` +
 		`"source":{"file":"review-2-source.txt","bytes":7,"sha256":"bb"},"parts":[{"path":"app.txt"}],` +
 		`"session_id":"s","delivered":true,"delivered_round":3,"review_parts":[{"part":1,"file":"review-2-part-1.txt",` +
-		`"bytes":4,"sha256":"cc","from":0,"to":4,"prompt_bytes":99,"session_id":"s1","delivered":true,"delivered_round":1}]}`
+		`"bytes":4,"sha256":"cc","from":0,"to":4,"prompt_bytes":99,"repaired_paths":["a.txt"],"repaired_more":3,"session_id":"s1","delivered":true,"delivered_round":1}]}`
 	var m review.Material
 	if err := json.Unmarshal([]byte(text), &m); err != nil {
 		t.Fatal(err)
@@ -162,7 +162,7 @@ func TestMaterialEvidenceJSON(t *testing.T) {
 	eq(t, "material-json delivered", m.Delivered, true)
 	eq(t, "material-json delivered_round", m.Round, 3)
 	deepEq(t, "material-json review_parts", m.ReviewParts, []review.Part{{Part: 1, File: "review-2-part-1.txt", Bytes: 4, SHA256: "cc",
-		From: 0, To: 4, PromptBytes: 99, SessionID: "s1", Delivered: true, DeliveredRound: 1}})
+		From: 0, To: 4, PromptBytes: 99, RepairedPaths: []string{"a.txt"}, RepairedMore: 3, SessionID: "s1", Delivered: true, DeliveredRound: 1}})
 	back, err := json.Marshal(m)
 	if err != nil {
 		t.Fatal(err)
