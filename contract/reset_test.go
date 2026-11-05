@@ -407,3 +407,51 @@ func TestResetFieldsSurviveTheRepairReconstruction(t *testing.T) {
 		t.Error("reset-repair: the replaced conversation was carried")
 	}
 }
+
+// TestAResumedPostResetRefusalKeepsItsFeedback pins that a window with no model item (a resumed
+// post-reset conversation the Env refuses again) treats the items after its handoff as pending:
+// the request sent after the reset carries the rejected-verdict feedback once, after the new
+// handoff (item reset-read-state).
+func TestAResumedPostResetRefusalKeepsItsFeedback(t *testing.T) {
+	t.Parallel()
+	in, h := newCeilingReview(t, 1000)
+	h.readAll = true
+	h.refuseNext = 1
+	const rejection = "invalid verdict:\nmissing.txt is not a file of the repository"
+	opening := map[string]any{"role": "user", "content": "OPENING " + strings.Repeat("o", 1000)}
+	file := "review-1-window-1.json"
+	windows := []review.Window{{File: file, SHA256: strings.Repeat("a", 64)}}
+	note, err := core.EncodeJSON(map[string]any{"version": 1, "review": 1, "window": map[string]any{"file": file, "sha256": windows[0].SHA256}, "unread_parts": 0, "note": resetNote})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff := map[string]any{"role": "user", "content": resetHeader + string(note)}
+	feedback := map[string]any{"role": "user", "content": rejection}
+	pass := greenPass()
+	raw, err := (review.Session{Role: reviewRole, Usage: core.ZeroTokens(), Input: []any{opening, handoff, feedback},
+		Seen: greenTree, Windows: windows}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Checkpoint = &review.Checkpoint{Stage: route.StageReview, Pass: &pass, Session: raw}
+	h.answers = []*provider.Response{answer(call("call-submit", "submit_review", approve))}
+	_, err = review.Independent{}.Resume(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eq(t, "reset-resumed refusals", len(h.refusals), 1)
+	sent := h.inputs[1]
+	eq(t, "reset-resumed sent items", len(sent), 3)
+	deepEq(t, "reset-resumed opening", sent[0], any(opening))
+	doc := handoffOf(t, sent)
+	if doc == nil {
+		t.Fatal("reset-resumed: no handoff")
+	}
+	deepEq(t, "reset-resumed handoff window", doc["window"].(map[string]any)["file"], any("review-1-window-2.json"))
+	deepEq(t, "reset-resumed rejection", sent[2], any(feedback))
+	eq(t, "reset-resumed carried once", strings.Count(fmt.Sprint(sent), rejection), 1)
+	events := eventsNamed(t, h.fakeEnv, "review_window_reset")
+	eq(t, "reset-resumed events", len(events), 1)
+	eq(t, "reset-resumed trigger", events[0]["trigger"], any("feedback"))
+}

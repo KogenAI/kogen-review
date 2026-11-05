@@ -1,0 +1,41 @@
+# Keep undelivered feedback in a repeated reset
+
+Slug: fix-k-review-reset-keeps-source-once
+Model: not applicable — the fix changes which items of one refused window a single reset treats as pending (a selection over a list); it adds no state, transition or interacting rule
+Acceptance:
+- .kogen/intents/fix-k-review-reset-keeps-source-once/acceptance.feature
+- features/steps/fix-k-review-reset-keeps-source-once__steps.js
+
+This fixes a review finding on the landed commit of k-review-reset-keeps-source-once (`review/reset.go`, `reset`). After a working-context reset, the native reviewer's conversation (`Session.Input`) is the unchanged opening O, one handoff H and Kogen's newest undelivered feedback F (for example a rejected `submit_review` verdict carried as `{"role":"user","content":<rejection text>}`). That post-reset conversation is checkpointed (`route.StageReview`) before it is sent. If the Env refuses that post-reset request again, the review stops with the Env's refusal. A resume (`review.Independent{}.Resume` with that checkpoint) then sends the same O + H + F again. If the Env refuses that resumed request too with `candidate/context_budget_exceeded`, `reset` runs on a window W = O + H + F that has no model item. Today `last < 0` leaves `pending = nil`, so F is silently dropped: the request sent after this reset is O + H' only, and the reviewer never sees why its verdict was rejected. This was reproduced on the unchanged tree (see Feasibility).
+
+After the fix, when W has no model item, the items after the handoff are pending. Their feedback is carried once, after the new handoff: the request sent after the reset is O + H' + F.
+
+Settled change (package `review`, `reset` in `review/reset.go`; nothing else changes):
+
+1. Opening O, model items, the delivered prefix D, the feedback rules, measuring, the custody record, the handoff text, the event, the progress line and the fallback to O + F are all unchanged. When W has a model item, D is W up to and including its last model item and P is the rest of W, exactly as today.
+2. When W has no model item and the item right after O is a handoff (a user message whose string content starts with `Kogen review working-context reset\n`), the pending items P are the items of W after that handoff. D stays O. The existing feedback rules then pick F out of P: user messages with string content other than the budget notice or a handoff, and `submit_review` `function_call_output`s with a string output. So the carried F is the earlier post-reset feedback, each message once, in order. It is also part of the mandatory material M = O + F.
+3. When W has no model item and no handoff follows O, P stays empty, as today. Examples are a refused first request (W = O) and a reopened conversation whose Kogen messages are all leading user messages and so part of O. Their reset input stays O + H (plus the budget notice when due).
+4. Read state is unchanged. `env.Unread(D)` with D = O, kept within the previous `ResetUnread`, gives the same `ResetUnread` as today.
+
+Boundaries: no other behavior, field, text or test changes. The external reviewer, verdict rules, budgets, instructions, tool definitions and golden files are unchanged. A second refusal of the request sent right after a reset still ends the review with that refusal (no second reset for the same request). Keep every existing test green.
+
+Acceptance runs a standalone Go program that the step embeds. The step writes it to `zz-fix-reset-driver/main.go` of a disposable copy of the checkout and runs it with `go run ./zz-fix-reset-driver <output>`. It uses only the public API of `review` and its pinned dependencies, with its own scripted Env and a temporary Git candidate. Do not add a top-level `zz-fix-reset-driver` directory.
+
+## Decisions
+- When a refused conversation has no model item, the items after its handoff are pending, so their undelivered feedback is carried once after the new handoff (source: request)
+- First a test that fails on the unchanged tree for exactly this scenario, then the fix that makes it pass; every existing test stays green and nothing unrelated changes (source: request)
+
+## Source comparison
+- Addressed: Problem (after a reset whose post-reset request was refused again, a resume's reset finds no model item, `last<0` sets `pending=nil` and the rejected-verdict feedback F is dropped; where: `review/reset.go` `reset`). It was reproduced on the unchanged tree: the request after the resumed reset is `[handoff]` with feedback count 0 (Feasibility). Item 2 changes it, and the acceptance scenario expects `["handoff", "feedback"]` with feedback count 1.
+- Addressed: Need 1 (first reproduce with a test that fails on current main for exactly this scenario). It reproduces, so the stop-and-report branch does not apply. Both the acceptance scenario and the new contract test (Tests) fail on the unchanged tree.
+- Addressed: Need 2 (treat items after the handoff as pending when there is no model item; add a test). Item 2, and the contract regression test.
+- Addressed: Need 3 (keep every existing test green; no unrelated changes). Items 1, 3 and 4, and the Boundaries.
+
+## Tests
+- A reset of a window with no model item treats the items after its handoff as pending, so a resumed post-reset request refused again is sent after the reset as O + new handoff + the rejected-verdict feedback once: add `TestAResumedPostResetRefusalKeepsItsFeedback` to `contract/reset_test.go`. It resumes a `route.StageReview` checkpoint whose session input is the opening, a handoff naming `review-1-window-1.json` and the rejection message `{"role":"user","content":<rejection text>}`, with `Windows` holding that window, over `ceilingEnv` with `refuseNext = 1`. It asserts that the request sent after the reset has exactly three items (the opening, a handoff naming `review-1-window-2.json` and the rejection message), with the rejection text once, and that the `review_window_reset` event's trigger is `feedback`. Add its name to the `reset-read-state` item of `contract/README.md`. Also the acceptance scenario, through Review then Resume (regression)
+- A window with no model item and no handoff still has nothing pending, so its reset input is O + H: existing `TestAReviewStopsOnTheEnvsRefusalWhenItCannotBeResolvedByAReset` (a refused first request) and `TestResetFieldsSurviveTheRepairReconstruction` (existing)
+- A window with a model item keeps today's delivered and pending split, feedback carried once and read state: existing `TestReviewResetsItsWorkingContextAfterACeilingRefusal`, `TestAnUndeliveredReadStaysUnreadAfterAReset`, `TestRejectedVerdictFeedbackIsCarriedOnceAcrossResets` and the k-review-reset-keeps-source-once acceptance (existing)
+
+## Feasibility
+- Reproduced on the unchanged tree (HEAD f63976b) in a disposable copy with the embedded driver (`go run ./zz-fix-reset-driver <output>`, exit 0, `go vet` clean, gofmt-formatted). The review sends a read, then a filler with a rejected `submit_review` (finding path `missing.txt`). Request 3 is refused over the ceiling, and the reset gives `[handoff, feedback]`. Request 4 (post-reset) is refused, and the review stops with `candidate/context_budget_exceeded`. Its last review checkpoint holds `[handoff, feedback]`. On resume, request 5 is refused, and the reset (window `review-1-window-2.json`, trigger `feedback`) sends request 6 as `[handoff]` with feedback count 0. Verdict approve. That observation equals the scenario's expected outcome except request 6, which the fix makes `[handoff, feedback]` with feedback count 1. (probe 1: exit 0)
+- evidence: {"id":"fix-reset-observer","kind":"observer","inputs":[".kogen/intents/fix-k-review-reset-keeps-source-once/acceptance.feature","features/steps/fix-k-review-reset-keeps-source-once__steps.js"],"observers":["features/steps/fix-k-review-reset-keeps-source-once__steps.js"],"checks":[{"name":"good","command":"\"$KOGEN_NODE\" features/steps/fix-k-review-reset-keeps-source-once__steps.js --control good","exit":0,"output":"fix reset observer accepted controls\n"},{"name":"bad","command":"\"$KOGEN_NODE\" features/steps/fix-k-review-reset-keeps-source-once__steps.js --control bad","exit":1,"output":"fix reset observer rejected the resumed reset without the rejected-verdict feedback\n"}]}

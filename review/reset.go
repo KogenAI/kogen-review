@@ -105,8 +105,12 @@ func (r *run) reset(refused error, force string, overBudget bool) (map[string]an
 		}
 	}
 	delivered, pending := opening, []any(nil)
-	if last >= 0 {
+	switch {
+	case last >= 0:
 		delivered, pending = w[:last+1], w[last+1:]
+	case len(opening) < len(w) && isHandoff(w[len(opening)]):
+		// A refused post-reset conversation: what follows its handoff had not reached the model.
+		pending = w[len(opening)+1:]
 	}
 
 	submits := map[any]bool{}
