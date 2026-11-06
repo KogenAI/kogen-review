@@ -52,7 +52,10 @@ commands:
   acceptance:
     run: 'NODE_PATH="$KOGEN_CUCUMBER" node cucumber.js --strict'
     steps_dir: 'features/steps'
-models:
+`
+
+// modelsYAML is the team model lineup .kogen/models.yaml, the only place LoadConfig takes the review role from.
+const modelsYAML = `models:
   review:
     executor: claude-code
     model: claude-opus-5-5
@@ -139,9 +142,10 @@ func TestRoleKeepsTheCheckpointBytes(t *testing.T) {
 	eq(t, "project.Role.Model", back.Model, "m2")
 	eq(t, "project.Role.Effort", back.Effort, "high")
 	eq(t, "project.Role.BaseURL", back.BaseURL, "http://127.0.0.1:1/v1")
-	// The role of the configuration's review model has the model and the effort it names.
+	// The review role LoadConfig takes from the team models file has the model and the effort it names.
 	root := t.TempDir()
 	write(t, root, project.ConfigPath, configYAML, 0o644)
+	write(t, root, ".kogen/models.yaml", modelsYAML, 0o644)
 	cfg, err := project.LoadConfig(root)
 	eq(t, "project.Role", err, nil)
 	review := cfg.Models["review"]
