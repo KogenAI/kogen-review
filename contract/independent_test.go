@@ -327,9 +327,8 @@ func lastOutput(r review.Request) string {
 
 // TestIndependentReviewJudgesACitedProbeByItsLatestRun pins that a probe cited after the tree
 // changed since its latest run is refused with both trees, that running it again on the current
-// tree establishes the requirement, and that the refused listing keeps the requirement from a
-// later approval that drops it, whether requirements are absent or the entry is missing (items
-// validate-evidence, session-listed).
+// tree establishes the requirement, and that only an accepted submission's requirements bind a
+// later approval (items validate-evidence, session-listed).
 func TestIndependentReviewJudgesACitedProbeByItsLatestRun(t *testing.T) {
 	t.Parallel()
 	const cited = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"probe","ref":"cat app.txt","met":true}]}`
@@ -346,36 +345,71 @@ func TestIndependentReviewJudgesACitedProbeByItsLatestRun(t *testing.T) {
 requirement "R1" cites probe "cat app.txt", whose latest run in this review was on tree `+greenTree+`, not on the current tree `+otherTree+`: run it again on the current tree before citing it`)
 	eq(t, "validate-evidence older tree verdict", res.Record.Verdict, "approve")
 
+	// A refused submission lists nothing: a later approval may omit its requirements or list
+	// others, and the checkpoint lists only what the accepted submissions listed.
+	for name, c := range map[string]struct {
+		second string
+		listed []string
+	}{
+		"absent":    {`{"verdict":"approve","findings":[]}`, nil},
+		"missing":   {`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R2","evidence":"test","ref":"t","met":true}]}`, []string{"R2"}},
+		"respelled": {`{"verdict":"approve","findings":[],"requirements":[{"requirement":"r1","evidence":"test","ref":"t","met":true}]}`, []string{"r1"}},
+	} {
+		in, h := newReview(t)
+		h.answers = []*provider.Response{submitReview(cited), submitReview(c.second)}
+		res, err := review.Independent{}.Review(context.Background(), in, h)
+		if err != nil {
+			t.Fatalf("session-listed refused %s: %v", name, err)
+		}
+		eq(t, "session-listed refused "+name+" verdict", res.Record.Verdict, "approve")
+		eq(t, "session-listed refused "+name+" refusal", lastOutput(h.requests[1]), "invalid verdict:\nrequirement \"R1\" cites a probe that did not run in this review: run its command with shell before citing it")
+		s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deepEq(t, "session-listed refused "+name+" checkpoint", s.Listed, c.listed)
+	}
+
+	// An accepted submission's requirements stay binding even when the review sends it back for
+	// another round: an approval that drops one is refused naming it, and the second refusal ends
+	// the review.
+	const dropped = `requirement "R1" was listed by an earlier submission of this review and is missing: keep every requirement in requirements, with evidence observed on the current tree`
+	const accepted = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"test","ref":"t","met":true}]}`
 	for name, second := range map[string]string{
 		"absent":  `{"verdict":"approve","findings":[]}`,
 		"missing": `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R2","evidence":"test","ref":"t","met":true}]}`,
 	} {
 		in, h := newReview(t)
-		h.answers = []*provider.Response{submitReview(cited), submitReview(second)}
+		writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+		h.answers = []*provider.Response{submitReview(accepted), submitReview(second), submitReview(second)}
+		h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
 		res, err := review.Independent{}.Review(context.Background(), in, h)
-		wantError(t, "session-listed "+name, err, "candidate", "review_invalid")
-		const dropped = `requirement "R1" was listed by an earlier submission of this review and is missing: keep every requirement in requirements, with evidence observed on the current tree`
-		eq(t, "session-listed "+name+" refusal", lastOutput(h.requests[1]), "invalid verdict:\nrequirement \"R1\" cites a probe that did not run in this review: run its command with shell before citing it")
-		if res.Invalid == nil || !slices.Contains(res.Invalid.Problems, dropped) {
-			t.Errorf("session-listed %s: the missing requirement was not a problem: %+v", name, res.Invalid)
+		wantError(t, "session-listed accepted "+name, err, "candidate", "review_invalid")
+		eq(t, "session-listed accepted "+name+" refusal", lastOutput(h.requests[2]), "invalid verdict:\n"+dropped)
+		if res.Invalid == nil || !slices.Equal(res.Invalid.Problems, []string{dropped}) {
+			t.Errorf("session-listed accepted %s: the missing requirement was not the only problem: %+v", name, res.Invalid)
 		}
 		s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
 		if err != nil {
 			t.Fatal(err)
 		}
-		deepEq(t, "session-listed "+name+" checkpoint", s.Listed, []string{"R1"})
+		deepEq(t, "session-listed accepted "+name+" checkpoint", s.Listed, []string{"R1"})
 	}
 
-	// A later approval that respells the listed requirement is accepted, and the first spelling
-	// stays the one listed and recorded.
+	// A later approval that respells an accepted requirement is accepted, and the first accepted
+	// spelling stays the one listed and recorded.
 	in, h = newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
 	respelled := `{"verdict":"approve","findings":[],"requirements":[{"requirement":"  r1 ","evidence":"test","ref":"t","met":true}]}`
-	h.answers = []*provider.Response{submitReview(cited), submitReview(respelled)}
+	h.answers = []*provider.Response{submitReview(accepted), submitReview(respelled)}
+	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
 	res, err = review.Independent{}.Review(context.Background(), in, h)
 	if err != nil {
 		t.Fatal(err)
 	}
 	eq(t, "session-listed respelled verdict", res.Record.Verdict, "approve")
+	rec := readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
+	deepEq(t, "session-listed respelled record", rec["requirements"], any([]any{map[string]any{"requirement": "R1", "evidence": "test", "ref": "t", "met": true}}))
 	s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
 	if err != nil {
 		t.Fatal(err)

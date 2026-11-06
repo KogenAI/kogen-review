@@ -154,10 +154,10 @@ type Session struct {
 	// ProbeRuns are those shell calls with the exit status the tool reported and the candidate's
 	// tree right after the call: what a probe a requirement cites is judged by.
 	ProbeRuns []ProbeRun `json:"probe_runs,omitempty"`
-	// Listed are the requirement texts of every well-formed requirements array a submission of
-	// this review gave, accepted or refused, one text per identity (the text without leading and
+	// Listed are the requirement texts of the submissions of this review that were accepted (a
+	// refused submission lists nothing), one text per identity (the text without leading and
 	// trailing whitespace, each run of whitespace as one space, letter case ignored) in its first
-	// spelling and in the order first listed: a later approval cannot drop one.
+	// accepted spelling and in the order first accepted: a later approval cannot drop one.
 	Listed            []string `json:"listed_requirements,omitempty"`
 	RepairRounds      int      `json:"repair_rounds,omitempty"`
 	FailureIdentities []string `json:"failure_identities,omitempty"`
@@ -1045,6 +1045,11 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	if problems != nil {
 		return nil, problems, nil
 	}
+	for _, q := range requirements {
+		if !slices.ContainsFunc(r.sess.Listed, func(l string) bool { return identity(l) == identity(q.Requirement) }) {
+			r.sess.Listed = append(r.sess.Listed, q.Requirement)
+		}
+	}
 	findings, dropped := cutFindings(findings)
 	return &Verdict{Verdict: verdict, Findings: findings, Dropped: dropped, Requirements: requirements}, nil, nil
 }
@@ -1142,7 +1147,8 @@ const requirementSuffix = "cite a probe you ran with shell on the current tree t
 // a probe the native reviewer cites must have run in this review, on the current tree, succeeded
 // and named a file or directory of the candidate, and an acceptance scenario must have passed in
 // the pass under review of the current tree; an approval keeps every requirement an earlier
-// submission of this review listed. A changes verdict quotes each unmet requirement in a blocking
+// submission of this review listed. It does not change Session.Listed: validate appends the
+// stored text of each requirement to it only when it accepts the submission. A changes verdict quotes each unmet requirement in a blocking
 // finding. A requirement is identified by its text without leading and trailing whitespace, each
 // run of whitespace as one space and letter case ignored: entries are grouped by identity, the
 // first spelling the review listed is the stored text, a group whose entries differ in evidence,
@@ -1170,7 +1176,7 @@ func (r *run) requirements(args map[string]any, verdict string, findings []map[s
 		}
 		out = append(out, Requirement{Requirement: text, Evidence: evidence, Ref: ref, Met: met})
 	}
-	listed := slices.Clone(r.sess.Listed)
+	listed := r.sess.Listed
 	var groups []Requirement
 	var conflicts []bool
 	index := map[string]int{}
@@ -1181,8 +1187,6 @@ func (r *run) requirements(args map[string]any, verdict string, findings []map[s
 			text := q.Requirement
 			if at := slices.IndexFunc(listed, func(l string) bool { return identity(l) == id }); at >= 0 {
 				text = listed[at]
-			} else {
-				r.sess.Listed = append(r.sess.Listed, text)
 			}
 			index[id] = len(groups)
 			groups = append(groups, Requirement{Requirement: text, Evidence: q.Evidence, Ref: q.Ref, Met: q.Met})

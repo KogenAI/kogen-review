@@ -151,6 +151,19 @@ func TestExternalReviewRequirementsSkipTheProbeCheck(t *testing.T) {
 	eq(t, "external-requirements feedback", x.inputs[1].Feedback,
 		`Not a valid verdict: requirement "R1" has no evidence: probe it with shell against the candidate before the verdict. Submit a corrected structured verdict.`)
 
+	// A refused verdict lists nothing: the approval that follows may reword its requirement.
+	in, h = newReview(t)
+	x = &fakeExecutor{t: t, results: []executor.RoundResult{
+		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"none","ref":"","met":false}]}`),
+		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1a","evidence":"probe","ref":"sh probe.sh","met":true}]}`)}}
+	ap, err = review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "external-requirements reworded verdict", ap.Record.Verdict, "approve")
+	reqs, _ := readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))["requirements"].([]any)
+	eq(t, "external-requirements reworded record", len(reqs), 1)
+
 	in, h = newReview(t)
 	x = &fakeExecutor{t: t, results: []executor.RoundResult{
 		structured(`{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"acceptance","ref":"S","met":true}]}`),
