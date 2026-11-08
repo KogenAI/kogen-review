@@ -1460,10 +1460,14 @@ func (r *run) ran(command string, input []any) bool {
 	return false
 }
 
-// quotes reports whether a blocking finding's message contains text.
+// quotes reports whether a blocking finding's message contains text, either as
+// prose or as an exact JSON string. A reviewer may quote a requirement containing
+// quotation marks using JSON escapes inside its finding's message.
 func quotes(findings []map[string]any, text string) bool {
+	encoded, _ := json.Marshal(text)
 	for _, f := range findings {
-		if message, _ := f["message"].(string); f["severity"] == "blocking" && strings.Contains(identity(message), identity(text)) {
+		message, _ := f["message"].(string)
+		if f["severity"] == "blocking" && (strings.Contains(identity(message), identity(text)) || strings.Contains(identity(message), identity(string(encoded)))) {
 			return true
 		}
 	}
