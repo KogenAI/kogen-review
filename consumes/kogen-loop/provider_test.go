@@ -62,9 +62,9 @@ func TestRespondRefusesBeforeAnyTransport(t *testing.T) {
 
 func TestRequestRoleRoutesTheRequest(t *testing.T) {
 	in := user("review")
-	// An empty provider is ChatGPT's.
+	// An empty provider is refused.
 	_, se := respond(t, provider.Request{Role: provider.Role{Model: "gpt-5"}, Input: in})
-	eq(t, "provider.Request.Role: an empty provider routes to chatgpt", se.Detail, "not signed in; run kogen provider login chatgpt")
+	eq(t, "provider.Request.Role: an empty provider is refused", se.Detail, "unknown provider ")
 	// A key provider routes to its own sign-in.
 	_, se = respond(t, provider.Request{Role: provider.Role{Provider: "anthropic", Model: "claude-opus-5-5", Effort: "high"}, Input: in})
 	eq(t, "provider.Request.Role: the provider names the route", se.Detail, "no usable Anthropic key; run kogen provider login anthropic")
@@ -124,7 +124,7 @@ func TestSupportsToolChoice(t *testing.T) {
 		role provider.Role
 		want bool
 	}{
-		{provider.Role{}, true},
+		{provider.Role{}, false},
 		{provider.Role{Provider: "chatgpt", Model: "gpt-5", Effort: "medium"}, true},
 		{provider.Role{Provider: "supergrok", Model: "grok-4.7"}, true},
 		{provider.Role{Provider: "opencode-go", Model: "kimi-k3"}, true},
@@ -135,12 +135,6 @@ func TestSupportsToolChoice(t *testing.T) {
 	} {
 		eq(t, "provider.SupportsToolChoice: "+tc.role.Provider+" "+tc.role.Model, provider.SupportsToolChoice(tc.role), tc.want)
 	}
-}
-
-func TestName(t *testing.T) {
-	eq(t, "provider.Name: a role that omits the provider routes to chatgpt", provider.Name(provider.Role{Model: "gpt-5"}), "chatgpt")
-	eq(t, "provider.Name: the role's provider", provider.Name(provider.Role{Provider: "anthropic"}), "anthropic")
-	eq(t, "provider.Name: sent unchanged, even unknown", provider.Name(provider.Role{Provider: "nosuch"}), "nosuch")
 }
 
 // review/independent.go: arguments and results of a tool call are recorded as fingerprints.

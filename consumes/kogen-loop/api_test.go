@@ -17,7 +17,6 @@ var (
 	_ func(string) *provider.Client                                                                                          = provider.NewClient
 	_ func(*provider.Client, context.Context, *sys.Session, provider.Request, provider.Observer) (*provider.Response, error) = (*provider.Client).Respond
 	_ func(any) *provider.Digest                                                                                             = provider.Fingerprint
-	_ func(provider.Role) string                                                                                             = provider.Name
 	_ func(provider.Role) bool                                                                                               = provider.SupportsToolChoice
 
 	// provider.Request fields kogen-review sets.

@@ -879,7 +879,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				// the provider, not unread-part progress. It is only a no-tool turn for the allowance.
 				env.Event(map[string]any{
 					"event": "provider_fault", "fault": "forced_tool_not_called", "review": r.in.Number, "tool": force,
-					"mode": "api_forced", "route": provider.Name(core.ProviderRole(r.sess.Role)), "model": r.sess.Role.Model,
+					"mode": "api_forced", "route": r.sess.Role.Provider, "model": r.sess.Role.Model,
 				})
 			}
 		}
