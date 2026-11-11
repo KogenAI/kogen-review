@@ -168,7 +168,7 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	if strings.Contains(text, reviewerOldSentence) || strings.Count(text, reviewerBatchParagraph) != 1 {
 		t.Fatal("reviewer must replace exactly the old batching sentence")
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "345eb0281e2330ba1bf3de62528693cf34d7b3963e91bf332231c94492c4d2bb" {
+	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "1aaaf6582febb8b75c1c096e7e806803ffff29b66d6e69a17b69c2d1aaf45dde" {
 		t.Fatalf("reviewer hash = %s", got)
 	}
 	data, err := os.ReadFile("testdata/defs_golden.json")
@@ -195,6 +195,24 @@ func TestExternalReviewTaskCarriesTheRequirementsRule(t *testing.T) {
 	for name, task := range map[string]string{"reviewTask": reviewTask, "reviewPartsTask": reviewPartsTask} {
 		if strings.Count(task, RequirementsRule) != 1 || !strings.Contains(task, LimitRaises+"\n"+RequirementsRule+"\n"+unsupportedClaimsRule+"\n"+final) {
 			t.Errorf("%s does not carry the requirements rule after the limit rule and the new final sentence", name)
+		}
+	}
+}
+
+// TestReviewerRejectsUnjustifiedComplexity pins the simplicity rule: the reviewer must name
+// unneeded settings, unused alternate paths and compatibility layers, keep justified current
+// choices and genuine provider, platform or security needs, and check that deletions are complete.
+func TestReviewerRejectsUnjustifiedComplexity(t *testing.T) {
+	text := ReviewerInstructions()
+	for _, want := range []string{
+		"each concrete setting, flag or env var that makes a fixed rule configurable",
+		"each alternate path nothing uses",
+		"compatibility alias, fallback or migration layer",
+		"A current choice the requirement states, or a genuine provider, platform or security need, stays.",
+		"confirm no caller, doc or test still uses the removed form",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("reviewer prompt lacks %q", want)
 		}
 	}
 }

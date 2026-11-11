@@ -388,7 +388,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	pass, err := env.Verify(ctx)
 	if err != nil {
 		record := core.ReviewRecord{N: r.in.Number, Verdict: verdict.Verdict, Findings: core.NonNil(verdict.Findings), Tree: r.sess.Tree}
-		if (r.sess.SyntheticBlock || r.legacySyntheticBlock()) && len(r.sess.Attempts) > 0 {
+		if r.sess.SyntheticBlock && len(r.sess.Attempts) > 0 {
 			last := r.sess.Attempts[len(r.sess.Attempts)-1]
 			record = core.ReviewRecord{N: r.in.Number, Verdict: last.Verdict, Findings: core.NonNil(last.Findings), Tree: last.Tree}
 		}
@@ -429,24 +429,6 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
-}
-
-// legacySyntheticBlock recognizes repair-limit checkpoints written before the marker existed.
-func (r *run) legacySyntheticBlock() bool {
-	s := r.sess
-	if s.Verdict == nil || s.Verdict.Verdict != "changes" || len(s.Verdict.Findings) != 1 || len(s.Attempts) == 0 {
-		return false
-	}
-	reason := "repeated identical final failures"
-	if s.FailureStreak < 3 {
-		if s.RepairRounds < 20 {
-			return false
-		}
-		reason = "repair round hard cap"
-	}
-	message := fmt.Sprintf("%s after %d repair rounds; current failing stage/items: %s", reason, s.RepairRounds, strings.Join(failureIdentities(r.pass), ", "))
-	f := s.Verdict.Findings[0]
-	return f["path"] == "" && f["severity"] == "blocking" && f["message"] == message
 }
 
 // seenTree is the tree whose bytes the reviewer holds.

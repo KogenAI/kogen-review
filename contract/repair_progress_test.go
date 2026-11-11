@@ -240,21 +240,4 @@ func TestRepairLimitResumeVerificationErrorRetainsActualSubmission(t *testing.T)
 	eq(t, "actual verdict", res.Record.Verdict, "approve")
 	eq(t, "actual tree", res.Record.Tree, otherTree)
 	eq(t, "completed rounds", res.Repairs, 3)
-	// Checkpoints created before the synthetic marker must retain the same evidence.
-	saved, e := review.DecodeSession(cp.Session)
-	if e != nil {
-		t.Fatal(e)
-	}
-	saved.SyntheticBlock = false
-	cp.Session, e = saved.Encode()
-	if e != nil {
-		t.Fatal(e)
-	}
-	in.Checkpoint = &cp
-	res, err = review.Independent{}.Resume(context.Background(), in, &unavailableEnv{fakeEnv: base, err: unavailable})
-	if err != unavailable {
-		t.Fatalf("legacy error: %v", err)
-	}
-	eq(t, "legacy actual verdict", res.Record.Verdict, "approve")
-	eq(t, "legacy actual tree", res.Record.Tree, otherTree)
 }
