@@ -189,7 +189,13 @@ func (e *wideEnv) Write(string, any) error             { return nil }
 type wideExec struct {
 	briefs  []executor.Brief
 	foreign int
+	size    func(executor.Brief) int // when set, the executor reports this first-prompt size
 }
+
+// sizedWide is a wideExec that reports its first prompt size through executor.PromptSizer.
+type sizedWide struct{ *wideExec }
+
+func (s sizedWide) FirstPromptBytes(_ string, brief executor.Brief) int { return s.size(brief) }
 
 func wideDescriptor() executor.Descriptor {
 	return executor.Descriptor{Name: "fixture-executor", Contract: "1", Version: "1.0.0",
@@ -263,7 +269,11 @@ func wideReviewWith(t *testing.T, r *edgeRepo, start string, x *wideExec) (*wide
 		Number: 1,
 		Run:    Run{ID: "run", Dir: dir},
 	}
-	res, err := NewExternal(x, wideDescriptor(), 4).Review(context.Background(), in, e)
+	var ex executor.Executor = x
+	if x.size != nil {
+		ex = sizedWide{x}
+	}
+	res, err := NewExternal(ex, wideDescriptor(), 4).Review(context.Background(), in, e)
 	return x, e, dir, res, err
 }
 
