@@ -1,7 +1,9 @@
 package review
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -249,8 +251,13 @@ func MaterialOf(in Input) (MaterialSet, error) {
 	}
 
 	modelText := ""
-	if t, err := readFile(c.Root, project.ModelPath(in.Intent.Slug)); err == nil {
+	// Only an absent model file is no model section; a model that exists but cannot be read is
+	// named, with its path and the error, where its text would be.
+	modelPath := project.ModelPath(in.Intent.Slug)
+	if t, err := readFile(c.Root, modelPath); err == nil {
 		modelText = "\n# model.qnt\n\n" + string(t) + "\n"
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		modelText = "\n# model.qnt\n\n" + unreadableNotice(modelPath, err) + "\n"
 	}
 	feature, err := readFile(c.Root, project.FeaturePath(in.Intent.Slug))
 	if err != nil {
@@ -263,6 +270,8 @@ func MaterialOf(in Input) (MaterialSet, error) {
 	if slices.Contains(c.Protected, "README.md") {
 		if t, err := readFile(c.Root, "README.md"); err == nil {
 			readme = string(t)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			readme = unreadableNotice("README.md", err)
 		}
 	} else if t, ok := repo.Show(c.Start, "README.md"); ok {
 		readme = t
@@ -457,6 +466,11 @@ func treeDrift(c Candidate, observed, green string) string {
 		return fact + "; no path differs in the compared trees"
 	}
 	return fact + "; changed paths: " + strings.Join(paths, ", ")
+}
+
+// unreadableNotice is the authority's line for a file that exists but could not be read.
+func unreadableNotice(path string, err error) string {
+	return path + " exists but could not be read: " + err.Error()
 }
 
 func readFile(root, rel string) ([]byte, error) { return os.ReadFile(filepath.Join(root, rel)) }
