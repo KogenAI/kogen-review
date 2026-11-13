@@ -61,8 +61,8 @@ func (h *ceilingEnv) Unread(input []any) ([]string, error) {
 }
 
 func (h *ceilingEnv) Request(ctx context.Context, r review.Request) (*provider.Response, []any, error) {
-	body := (&provider.Client{}).Body(provider.Request{Role: core.ProviderRole(r.Role), Instructions: r.Instructions, Input: r.Input, Tools: r.Tools, ToolChoice: r.ForceTool})
-	m, err := tools.Measure(body, core.ProviderRole(r.Role))
+	body := (&provider.Client{}).Body(provider.Request{Role: review.ProviderRole(r.Role), Instructions: r.Instructions, Input: r.Input, Tools: r.Tools, ToolChoice: r.ForceTool})
+	m, err := tools.Measure(body, review.ProviderRole(r.Role))
 	if err != nil {
 		return nil, nil, err
 	}

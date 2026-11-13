@@ -78,7 +78,7 @@ func keepIn(unread, keep []string) []string {
 
 // measure is the rendered size of input as the next request, against the request ceiling.
 func (r *run) measure(input []any, force string) (tools.Measurement, error) {
-	role := core.ProviderRole(r.sess.Role)
+	role := ProviderRole(r.sess.Role)
 	body := (&provider.Client{}).Body(provider.Request{Role: role, Instructions: ReviewerInstructions(), Input: input, Tools: r.tools, ToolChoice: force})
 	return tools.Measure(body, role)
 }

@@ -4,10 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
-	"github.com/KogenAI/kogen-loop/provider"
 )
 
 func TestCountAndZeroTokens(t *testing.T) {
@@ -42,27 +40,6 @@ func TestTokensPlus(t *testing.T) {
 	if b, _ := core.EncodeJSON(got); string(b) != `{"input":2,"cached":3,"output":4,"reasoning":null}` {
 		t.Errorf("core.Tokens.Plus unknown: bytes %s", b)
 	}
-}
-
-func TestProviderRole(t *testing.T) {
-	got := core.ProviderRole(project.Role{Provider: "openai-compatible", Model: "m", Effort: "high", BaseURL: "http://x", Executor: "ignored"})
-	eq(t, "core.ProviderRole", got, provider.Role{Provider: "openai-compatible", Model: "m", Effort: "high", BaseURL: "http://x"})
-	eq(t, "core.ProviderRole empty", core.ProviderRole(project.Role{}), provider.Role{})
-}
-
-func TestResponseTokens(t *testing.T) {
-	resp := &provider.Response{
-		Usage: provider.Usage{Input: 10, Cached: 4, Output: 3, Reasoning: 2},
-		Known: provider.KnownUsage{Input: core.Count(100), Cached: core.Count(40), Output: core.Count(30)},
-	}
-	// The compatible totals of every route but Anthropic, always integers.
-	for _, p := range []string{"", "chatgpt", "openai-compatible"} {
-		eq(t, "core.ResponseTokens "+p, core.ResponseTokens(project.Role{Provider: p}, resp),
-			core.Tokens{Input: core.Count(10), Cached: core.Count(4), Output: core.Count(3), Reasoning: core.Count(2)})
-	}
-	// Anthropic's totals come from the validated analytical usage; a count it omits is unknown.
-	eq(t, "core.ResponseTokens anthropic", core.ResponseTokens(project.Role{Provider: "anthropic"}, resp),
-		core.Tokens{Input: core.Count(100), Cached: core.Count(40), Output: core.Count(30)})
 }
 
 func TestExecutorUsagePlus(t *testing.T) {

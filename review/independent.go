@@ -713,7 +713,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				tool = reminderTool(unread)
 			}
 			mode := "text_fallback"
-			if provider.SupportsToolChoice(core.ProviderRole(r.sess.Role)) {
+			if provider.SupportsToolChoice(ProviderRole(r.sess.Role)) {
 				mode = "api_forced"
 				force = tool
 			}
@@ -764,7 +764,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		}
 		// The reminder request is over: ordinary tool choice again.
 		r.sess.Remind = false
-		r.sess.Usage = r.sess.Usage.Plus(core.ResponseTokens(r.sess.Role, resp))
+		r.sess.Usage = r.sess.Usage.Plus(ResponseTokens(r.sess.Role, resp))
 		if err := env.Track(); err != nil {
 			return Verdict{}, err
 		}

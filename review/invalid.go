@@ -32,7 +32,7 @@ func (r *run) invalidStop(problems []string, reason string, forced bool) error {
 		Pass: r.pass, Base: r.base, Reopened: r.sess.Reopened, Repaired: r.sess.Repaired,
 	}
 	if reason == "no_tool_reminder_exhausted" || reason == "no_tool_reminder_cap" {
-		role := core.ProviderRole(r.sess.Role)
+		role := ProviderRole(r.sess.Role)
 		end.ProseTurns, end.ForcedRequests, end.ForcedAnswered = r.sess.ProseTurns, r.sess.ForcedRequests, r.sess.ForcedAnswered
 		end.Route, end.Model, end.ToolChoice = role.Provider, r.sess.Role.Model, "text_fallback"
 		if provider.SupportsToolChoice(role) {

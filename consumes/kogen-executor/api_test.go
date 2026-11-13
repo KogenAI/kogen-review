@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/agent"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
-	"github.com/KogenAI/kogen-loop/provider"
 	"github.com/KogenAI/kogen-loop/sys"
 	"github.com/KogenAI/kogen-loop/tools"
 )
@@ -38,8 +36,6 @@ var (
 	_ func(core.Tokens, core.Tokens) core.Tokens = core.Tokens.Plus
 
 	// core: roles, responses and tools, whose signatures carry values of the other dependencies.
-	_ func(project.Role) provider.Role                                  = core.ProviderRole
-	_ func(project.Role, *provider.Response) core.Tokens                = core.ResponseTokens
 	_ func(*tools.Tools, []string) []any                                = core.ShellDefinitions
 	_ func(string) *sys.Error                                           = core.ResumeRefused
 	_ func(core.ExecutorUsage, executor.Usage, bool) core.ExecutorUsage = core.ExecutorUsage.Plus

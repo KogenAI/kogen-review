@@ -315,7 +315,7 @@ func (e *env) Prefill(_ project.Role, _ string, _, input []any) ([]any, error) {
 
 func (e *env) Request(ctx context.Context, r review.Request) (*provider.Response, []any, error) {
 	resp, err := e.client.Respond(ctx, e.s, provider.Request{
-		Role: core.ProviderRole(r.Role), Instructions: r.Instructions, Input: r.Input, Tools: r.Tools, ToolChoice: r.ForceTool,
+		Role: review.ProviderRole(r.Role), Instructions: r.Instructions, Input: r.Input, Tools: r.Tools, ToolChoice: r.ForceTool,
 	}, nil)
 	return resp, r.Input, err
 }
