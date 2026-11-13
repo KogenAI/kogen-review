@@ -1,0 +1,1 @@
+{"deferred":"The correct implementation edits the reviewer's evidence check in review/independent.go inside a large file whose acceptance driver is a Go program built against the whole module; honest whole-file control overlays are not practical within the shaping budget, so the Build writes the implementation."}

@@ -1345,12 +1345,9 @@ func (e *evidenceCheck) acceptance(quoted, ref string) (string, error) {
 	if pass.Tree != current {
 		return cites + ", whose result is of tree " + pass.Tree + ", not of the current tree " + current + ": an earlier result is history and does not establish the requirement on the current tree; " + requirementSuffix, nil
 	}
-	cited := false
-	for _, sc := range pass.Acceptance.Scenarios {
-		if !citesScenario(ref, sc) {
-			continue
-		}
-		cited = true
+	scenarios := pass.Acceptance.Scenarios
+	cited, ambiguous := citedScenarios(ref, scenarios)
+	for _, sc := range cited {
 		switch sc.Status {
 		case "passed":
 		case "failed":
@@ -1359,23 +1356,84 @@ func (e *evidenceCheck) acceptance(quoted, ref string) (string, error) {
 			return quoted + " cites acceptance scenario \"" + sc.Name + "\", whose result on the current tree is " + sc.Status + ", not passed: " + requirementSuffix, nil
 		}
 	}
-	if !cited {
+	if len(cited) == 0 {
+		if len(ambiguous) > 0 {
+			names := make([]string, len(ambiguous))
+			for i, sc := range ambiguous {
+				names[i] = "\"" + sc.Name + "\""
+			}
+			return cites + ", which is ambiguous: it matches steps of several scenarios and names none of them (" + strings.Join(names, ", ") + "): name the scenario that exercises the requirement, or " + requirementSuffix, nil
+		}
 		return cites + ", which names no scenario of the acceptance result: name the scenario that exercises the requirement, or " + requirementSuffix, nil
 	}
 	return "", nil
 }
 
-// citesScenario reports whether ref contains the scenario's name or the text of one of its steps.
-func citesScenario(ref string, sc verify.ScenarioResult) bool {
-	if sc.Name != "" && strings.Contains(ref, sc.Name) {
-		return true
-	}
-	for _, step := range sc.Steps {
-		if step.Text != "" && strings.Contains(ref, step.Text) {
-			return true
+// citedScenarios are the scenarios ref identifies, in acceptance-result order. Whole scenario
+// names contained in ref take precedence (a name that is a proper substring of another contained
+// name does not count) and step text is then not consulted. Otherwise a scenario is cited by
+// contained step text that occurs in exactly one scenario. When none is cited, ambiguous are the
+// scenarios having contained step text shared by several scenarios.
+func citedScenarios(ref string, scenarios []verify.ScenarioResult) (cited, ambiguous []verify.ScenarioResult) {
+	var named []verify.ScenarioResult
+	for _, sc := range scenarios {
+		if sc.Name != "" && strings.Contains(ref, sc.Name) {
+			named = append(named, sc)
 		}
 	}
-	return false
+	for _, sc := range named {
+		longer := false
+		for _, other := range named {
+			if len(other.Name) > len(sc.Name) && strings.Contains(other.Name, sc.Name) {
+				longer = true
+				break
+			}
+		}
+		if !longer {
+			cited = append(cited, sc)
+		}
+	}
+	if len(named) > 0 {
+		return cited, nil
+	}
+	hasStep := func(sc verify.ScenarioResult, text string) bool {
+		for _, step := range sc.Steps {
+			if step.Text == text {
+				return true
+			}
+		}
+		return false
+	}
+	for _, sc := range scenarios {
+		unique, shared := false, false
+		seen := map[string]bool{}
+		for _, step := range sc.Steps {
+			if step.Text == "" || seen[step.Text] || !strings.Contains(ref, step.Text) {
+				continue
+			}
+			seen[step.Text] = true
+			count := 0
+			for _, other := range scenarios {
+				if hasStep(other, step.Text) {
+					count++
+				}
+			}
+			if count == 1 {
+				unique = true
+			} else {
+				shared = true
+			}
+		}
+		if unique {
+			cited = append(cited, sc)
+		} else if shared {
+			ambiguous = append(ambiguous, sc)
+		}
+	}
+	if len(cited) > 0 {
+		ambiguous = nil
+	}
+	return cited, ambiguous
 }
 
 // exitStatus is N when a shell result text begins with "exit status: N" and a newline or its
