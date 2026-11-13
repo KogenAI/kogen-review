@@ -701,14 +701,25 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		force := ""
 		required := r.sess.Remind || overBudget
 		if required {
+			tool := SubmitReviewTool
+			var unread []string
+			if !r.external {
+				var err error
+				if unread, err = r.unread(r.sess.Input); err != nil {
+					return Verdict{}, err
+				}
+			}
+			if !overBudget {
+				tool = reminderTool(unread)
+			}
 			mode := "text_fallback"
 			if provider.SupportsToolChoice(core.ProviderRole(r.sess.Role)) {
 				mode = "api_forced"
-				force = SubmitReviewTool
+				force = tool
 			}
 			env.Event(map[string]any{
-				"event": "review_tool_choice", "review": r.in.Number, "tool": SubmitReviewTool, "mode": mode,
-				"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
+				"event": "review_tool_choice", "review": r.in.Number, "tool": tool, "mode": mode,
+				"unread": len(unread), "rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
 			})
 		}
 		send := func() (*provider.Response, []any, error) {
@@ -875,7 +886,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		if len(calls) == 0 {
 			problems = []string{"the review ended without calling submit_review"}
 			if force != "" {
-				// The route was told to call submit_review and answered with text only: a fault of
+				// The route was told to call a tool (read_file or submit_review) and answered with text only: a fault of
 				// the provider, not unread-part progress. It is only a no-tool turn for the allowance.
 				env.Event(map[string]any{
 					"event": "provider_fault", "fault": "forced_tool_not_called", "review": r.in.Number, "tool": force,
@@ -900,8 +911,14 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			if r.sess.NoTool >= noToolReminderCap {
 				return Verdict{}, r.invalidStop(problems, "no_tool_reminder_cap", force != "")
 			}
-			input = append(input, map[string]any{"role": "user",
-				"content": "Not a valid verdict: " + strings.Join(problems, "; ") + ". Call submit_review."})
+			var unread []string
+			if !r.external {
+				var err error
+				if unread, err = r.unread(input); err != nil {
+					return Verdict{}, err
+				}
+			}
+			input = append(input, map[string]any{"role": "user", "content": reminderText(problems, unread)})
 			r.sess.NoTool++
 			r.sess.Restored = false
 			r.sess.Remind = true
