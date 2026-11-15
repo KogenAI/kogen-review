@@ -417,7 +417,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 		"Use the actual results, including failures and unrun items. Do not infer an operator\n" +
 		"explanation. Submit changes if unresolved, or explicitly approve after resolving it;\n" +
 		"edits still require ordinary external exact verification before commit.\n"
-	delivery, err := deliverySection(r.in.Candidate, r.seenTree(), pass.Tree)
+	delivery, _, err := deliverySection(r.in.Candidate, r.seenTree(), pass.Tree)
 	if err != nil {
 		return Result{}, err
 	}
@@ -441,21 +441,31 @@ func (r *run) seenTree() string {
 
 // deliverySection tells the reviewer that the candidate changed after its contents were
 // delivered, with the exact diff against the seen tree. It is empty when the trees are equal.
-func deliverySection(c Candidate, seen, now string) (string, error) {
+// It also returns the changed paths it computed.
+func deliverySection(c Candidate, seen, now string) (string, []string, error) {
 	if seen == now {
-		return "", nil
+		return "", nil, nil
 	}
 	paths, err := c.Repo.Changed(seen, now)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	diff, err := c.Repo.Diff(seen, now, paths)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	return "Your verdict was not applied: the candidate changed after its contents were delivered to you, other than through your own Kogen tool calls: " +
 		strings.Join(paths, ", ") + ".\nThe exact diff of these changes against the contents delivered to you:\n\n" +
-		strings.ToValidUTF8(diff, "�") + "\n", nil
+		strings.ToValidUTF8(diff, "�") + "\n", paths, nil
+}
+
+// namedPaths lists at most five changed paths, then how many more there are.
+func namedPaths(paths []string) string {
+	const most = 5
+	if len(paths) <= most {
+		return strings.Join(paths, ", ")
+	}
+	return strings.Join(paths[:most], ", ") + fmt.Sprintf(", and %d more", len(paths)-most)
 }
 
 // evaluate judges a valid verdict on the candidate tree. A blocked review ends the Build.
@@ -533,12 +543,12 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		return Result{Record: approved, Pass: final, Repairs: r.sess.RepairRounds, Environment: r.environment()}, false, nil
 	}
 
-	feedback, err := deliverySection(r.in.Candidate, seen, final.Tree)
+	feedback, changed, err := deliverySection(r.in.Candidate, seen, final.Tree)
 	if err != nil {
 		return Result{}, false, err
 	}
 	if feedback != "" {
-		env.Progress(fmt.Sprintf("kogen: review %d: the candidate changed after its contents were delivered; returning the changes to the reviewer", n))
+		env.Progress(fmt.Sprintf("kogen: review %d: the candidate changed after its contents were delivered (%s); returning the changes to the reviewer", n, namedPaths(changed)))
 	}
 	if final.Green {
 		feedback += "The new tree passed checks but has not been reviewed. Inspect these changes and submit_review for the current contents; do not restart the whole critique."

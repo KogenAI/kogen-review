@@ -221,7 +221,7 @@ func TestIndependentApprovalOfAnUnverifiedTreeIsVerifiedFirst(t *testing.T) {
 		!strings.Contains(content, "diff --git a/app.txt b/app.txt") || !strings.Contains(content, "-candidate\n+"+otherText) {
 		t.Errorf("independent-exact-tree feedback: %q", content)
 	}
-	if !slices.Contains(h.progress, "kogen: review 1: the candidate changed after its contents were delivered; returning the changes to the reviewer") {
+	if !slices.Contains(h.progress, "kogen: review 1: the candidate changed after its contents were delivered (app.txt); returning the changes to the reviewer") {
 		t.Errorf("independent-exact-tree progress: %q", h.progress)
 	}
 }
