@@ -1,6 +1,8 @@
 package review
 
 import (
+	"fmt"
+
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-loop/provider"
 	"github.com/KogenAI/kogen-loop/sys"
@@ -10,12 +12,49 @@ import (
 // candidate/review_invalid stop: the caller decides what follows (a Build's retry and
 // review-only handling), the reviewer only records the facts.
 
-// allowance records a consumption of the review's allowances in the run log.
-func (r *run) allowance(why string) {
-	r.env.Event(map[string]any{
+// Caps on a rejected verdict's recorded problems: lines, runes per line, and runes of the
+// problem shown in the progress line.
+const (
+	recordedProblemLines = 10
+	recordedProblemRunes = 300
+	progressProblemRunes = 160
+)
+
+// cutRunes returns s cut at n runes, with no marker.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
+// allowance records a consumption of the review's allowances in the run log. A rejected
+// verdict also records its problems (the lines the reviewer is told, cut) and shows the first
+// one in the progress before the reviewer is asked again.
+func (r *run) allowance(why string, problems []string) {
+	event := map[string]any{
 		"event": "review_allowance", "review": r.in.Number, "why": why,
 		"rejected_verdicts": r.sess.Rejected, "no_tool_reminders": r.sess.NoTool,
-	})
+	}
+	if why == "rejected_verdict" {
+		kept := make([]string, 0, recordedProblemLines)
+		for i, p := range problems {
+			if i == recordedProblemLines {
+				break
+			}
+			kept = append(kept, cutRunes(p, recordedProblemRunes))
+		}
+		event["problems"] = kept
+		r.env.Event(event)
+		if len(problems) > 0 {
+			r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted: %s", r.in.Number, cutRunes(problems[0], progressProblemRunes)))
+		}
+		return
+	}
+	r.env.Event(event)
 }
 
 // invalidStop ends the review without a verdict (the second spending of an allowance). It

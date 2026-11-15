@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/KogenAI/kogen-executor/core"
@@ -173,4 +174,31 @@ func TestExternalReviewRequirementsSkipTheProbeCheck(t *testing.T) {
 	}
 	eq(t, "external-acceptance feedback", x.inputs[1].Feedback,
 		`Not a valid verdict: requirement "R1" cites acceptance "S", which did not run on the current tree (not_run): naming a scenario is not evidence; cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run. Submit a corrected structured verdict.`)
+}
+
+// TestExternalRejectedVerdictRecordsItsProblems pins that a rejected structured verdict records
+// the problems sent back in its review_allowance event, shows the first in the progress once,
+// and leaves the later approval unchanged.
+func TestExternalRejectedVerdictRecordsItsProblems(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(`{"findings":[]}`), structured(`{"verdict":"approve","findings":[]}`)}}
+	res, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "rejected-problems verdict", res.Record.Verdict, "approve")
+	const problem = "submit_review needs verdict (approve or changes) and a findings list; verdict must be approve or changes but was missing"
+	spent := eventsNamed(t, h, "review_allowance")
+	eq(t, "rejected-problems allowance events", len(spent), 1)
+	eq(t, "rejected-problems why", spent[0]["why"], any("rejected_verdict"))
+	deepEq(t, "rejected-problems problems", spent[0]["problems"], any([]string{problem}))
+	eq(t, "rejected-problems feedback", x.inputs[1].Feedback, "Not a valid verdict: "+problem+". Submit a corrected structured verdict.")
+	var shown []string
+	for _, line := range h.progress {
+		if strings.HasPrefix(line, "kogen: review 1: verdict not accepted") {
+			shown = append(shown, line)
+		}
+	}
+	deepEq(t, "rejected-problems progress", shown, []string{"kogen: review 1: verdict not accepted: " + problem})
 }

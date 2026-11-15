@@ -645,6 +645,35 @@ func TestCallsAfterASubmissionAreAnsweredByItsOutcome(t *testing.T) {
 	eq(t, "submit-then-calls ignored probes", len(s.Probes), 0)
 }
 
+// TestIndependentRejectedVerdictRecordsItsProblems pins that a rejected native verdict records
+// the problems of the invalid verdict tool output, cut at 300 runes and 10 lines, with one
+// progress line whose problem is cut at 160 runes.
+func TestIndependentRejectedVerdictRecordsItsProblems(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	h.answers = []*provider.Response{
+		submitReview(`{"findings":[]}`),
+		submitReview(`{"verdict":"approve","findings":[]}`),
+	}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "native-problems verdict", res.Record.Verdict, "approve")
+	const problem = "submit_review needs verdict (approve or changes) and a findings list; verdict must be approve or changes but was missing"
+	deepEq(t, "native-problems told", outputsOf(h.requests[1]), []string{"invalid verdict:\n" + problem})
+	spent := eventsNamed(t, h, "review_allowance")
+	eq(t, "native-problems allowance events", len(spent), 1)
+	deepEq(t, "native-problems problems", spent[0]["problems"], any([]string{problem}))
+	var shown []string
+	for _, line := range h.progress {
+		if strings.HasPrefix(line, "kogen: review 1: verdict not accepted") {
+			shown = append(shown, line)
+		}
+	}
+	deepEq(t, "native-problems progress", shown, []string{"kogen: review 1: verdict not accepted: " + problem})
+}
+
 // TestIndependentReviewHandsOnCollapsedBoundedFindings pins that the stored and handed-on verdict
 // is the collapsed, cut one (item independent-findings): two copies of one blocking finding plus
 // 60 distinct ones end in candidate/review_blocked with 50 review lines, and the Result record,

@@ -473,7 +473,7 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 			}
 			invalid++
 			r.sess.Rejected = invalid
-			r.allowance("rejected_verdict")
+			r.allowance("rejected_verdict", problems)
 			// An external executor's structured verdict has no API-level tool choice to force: the
 			// correction goes back as text only.
 			env.Event(map[string]any{

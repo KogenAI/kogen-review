@@ -903,7 +903,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		switch {
 		case problems != nil && exempt:
 			// Progress on unread parts spends neither allowance.
-			r.allowance("unread_progress_exempt")
+			r.allowance("unread_progress_exempt", nil)
 		case problems != nil && len(calls) == 0:
 			if r.sess.NoTool >= 1 && !r.sess.Restored {
 				return Verdict{}, r.invalidStop(problems, "no_tool_reminder_exhausted", force != "")
@@ -922,13 +922,13 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			r.sess.NoTool++
 			r.sess.Restored = false
 			r.sess.Remind = true
-			r.allowance("no_tool_turn")
+			r.allowance("no_tool_turn", nil)
 		case problems != nil:
 			if r.sess.Rejected >= 1 {
 				return Verdict{}, r.invalidStop(problems, "rejected_verdict_exhausted", false)
 			}
 			r.sess.Rejected++
-			r.allowance("rejected_verdict")
+			r.allowance("rejected_verdict", problems)
 		case verdict != nil:
 			r.sess.Input = input
 			if !r.external {
