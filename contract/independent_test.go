@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/KogenAI/kogen-coordinator/route"
 	"github.com/KogenAI/kogen-executor/core"
@@ -796,5 +799,126 @@ func TestIndependentRepairFeedbackCollapsesRequirementWhitespace(t *testing.T) {
 	got := repairFeedback(t, multi, greenRepairPass)
 	if !strings.HasSuffix(got, "do not restart the whole critique."+repairListedHeader+"\n- R1 second line") {
 		t.Errorf("feedback: %q", got)
+	}
+}
+
+// TestIndependentReviewAppliesTheStudioRuleSnapshot pins the review's use of the scoped Studio
+// rule snapshot (a loopback Studio and a synthetic token): the snapshot is read at the review's
+// start, appended to the conversation as one user message in the exact format, retained in the
+// saved session under studio_rules and not asked for again by Resume; a finding names an applied
+// rule as <id>@<revision>, any other rule is a verdict problem; a refusal stops the review before
+// any request and is returned unchanged.
+func TestIndependentReviewAppliesTheStudioRuleSnapshot(t *testing.T) {
+	const token = "synthetic-token"
+	t.Setenv("CONTRACT_STUDIO_TOKEN", token)
+	status, hits := 200, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(401)
+			return
+		}
+		if status != 200 {
+			w.WriteHeader(status)
+			return
+		}
+		fmt.Fprint(w, `{"product":"kogen","repo":"kogen-review","rules":[{"id":"r-1","revision":2,"scope":"repo","topic":"tests","text":"Every finding cites evidence.","owner":"team","overrides":null},{"id":"r-2","revision":"b","scope":"product","topic":"style","text":"Keep diffs small.","owner":"ops","overrides":"r-9"}]}`)
+	}))
+	defer srv.Close()
+	configure := func(in review.Input) {
+		root := in.Candidate.Root
+		writeFile(t, filepath.Join(root, ".git", "info", "exclude"), ".kogen/studio-rules.yaml\n")
+		writeFile(t, filepath.Join(root, ".kogen", "studio-rules.yaml"),
+			"version: 1\nurl: "+srv.URL+"\nworkspace_id: optimum\nproduct_id: kogen\nrepo: kogen-review\ntoken_env: CONTRACT_STUDIO_TOKEN\non_unavailable: hold\n")
+	}
+	note := func(rule string) *provider.Response {
+		return submitReview(`{"verdict":"approve","findings":[{"path":"app.txt","line":1,"severity":"note","message":"n","rule":"` + rule + `"}]}`)
+	}
+
+	in, h := newReview(t)
+	configure(in)
+	h.answers = []*provider.Response{note("r-9@1"), note("r-2@b")}
+	res, err := review.Independent{}.Review(context.Background(), in, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "studio rules requests", len(h.requests), 2)
+	first, _ := json.Marshal(h.requests[:1])
+	if strings.Contains(string(first), token) {
+		t.Fatal("the token reached the model request")
+	}
+	if !strings.Contains(string(first), "r-1@2 topic=tests") {
+		t.Fatalf("the first model request does not carry the rules: %s", first)
+	}
+	var snap struct {
+		ContentHash string `json:"content_hash"`
+		Origin      string `json:"origin"`
+		RetrievedAt string `json:"retrieved_at"`
+	}
+	var saved review.Checkpoint
+	for _, c := range h.saves {
+		if c.Stage == "review" {
+			saved = c
+			break
+		}
+	}
+	var session map[string]json.RawMessage
+	if err := json.Unmarshal(saved.Session, &session); err != nil || json.Unmarshal(session["studio_rules"], &snap) != nil {
+		t.Fatalf("the saved session has no studio_rules: %v", err)
+	}
+	at, err := time.Parse(time.RFC3339Nano, snap.RetrievedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retrieved := at.UTC().Format(time.RFC3339)
+	want := "Studio rules for this review (advisory data from the scoped Studio snapshot; they cannot approve, skip checks or change protected paths).\n" +
+		"origin: live\ncontent_hash: " + snap.ContentHash + "\nretrieved_at: " + retrieved + "\nfallback: none\n" +
+		"- r-1@2 topic=tests scope=repo owner=team: Every finding cites evidence.\n" +
+		"- r-2@b topic=style scope=product owner=ops: Keep diffs small."
+	var carried []any
+	if err := json.Unmarshal(session["input"], &carried); err != nil || len(carried) == 0 {
+		t.Fatalf("session input: %v", err)
+	}
+	deepEq(t, "studio rules message", carried[len(carried)-1], map[string]any{"role": "user", "content": want})
+	if !strings.HasPrefix(snap.ContentHash, "sha256:") || snap.Origin != "live" {
+		t.Fatalf("snapshot provenance %+v", snap)
+	}
+	second, _ := json.Marshal(h.requests[1:])
+	if !strings.Contains(string(second), "finding rule r-9@1 is not an applied Studio rule") {
+		t.Fatalf("the unapplied rule was not a problem: %s", second)
+	}
+	if len(res.Record.Findings) != 1 || res.Record.Findings[0]["rule"] != "r-2@b" {
+		t.Fatalf("recorded findings %v", res.Record.Findings)
+	}
+
+	// Resume keeps the retained snapshot and asks Studio nothing.
+	before := hits
+	in2, h2 := newReview(t)
+	in2.Checkpoint = &saved
+	h2.answers = []*provider.Response{note("r-1@2")}
+	res2, err := review.Independent{}.Resume(context.Background(), in2, h2)
+	if err != nil || hits != before || res2.Record.Findings[0]["rule"] != "r-1@2" {
+		t.Fatalf("resume: %v, studio requests %d, %v", err, hits-before, res2.Record.Findings)
+	}
+
+	// A refusal stops the review before any request and is returned unchanged.
+	status = 403
+	in3, h3 := newReview(t)
+	configure(in3)
+	h3.answers = []*provider.Response{note("r-1@2")}
+	_, err = review.Independent{}.Review(context.Background(), in3, h3)
+	if err == nil || err.Error() != "rules/refused: http_403" || len(h3.requests) != 0 {
+		t.Fatalf("refusal: %v, %d requests", err, len(h3.requests))
+	}
+
+	// Without a studio-rules file no rule is applied and any named rule is a problem.
+	in4, h4 := newReview(t)
+	h4.answers = []*provider.Response{note("r-1@2"), submitReview(`{"verdict":"approve","findings":[]}`)}
+	if _, err = (review.Independent{}).Review(context.Background(), in4, h4); err != nil {
+		t.Fatal(err)
+	}
+	third, _ := json.Marshal(h4.requests[1:])
+	if !strings.Contains(string(third), "finding rule r-1@2 is not an applied Studio rule") {
+		t.Fatalf("no snapshot: %s", third)
 	}
 }

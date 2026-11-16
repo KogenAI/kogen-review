@@ -1,0 +1,1 @@
+{"deferred":"The correct implementation spans the review run entry, the saved Session, the submit_review schema with its regenerated golden, the coordinator dependency bump and its consumes pin; it is too large to write honestly within the shaping budget, so the Build writes it and the acceptance driver exercises it through the contract suite."}

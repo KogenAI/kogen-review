@@ -68,6 +68,19 @@ var reviewRole = project.Role{Provider: "chatgpt", Model: "fixture-review-model"
 // greenPass is the green pass of greenTree a review is given.
 func greenPass() verify.Pass { return verify.Pass{N: 1, Clean: true, Green: true, Tree: greenTree} }
 
+// requestLog is the model requests a fakeEnv recorded. A review.Request holds funcs, which JSON
+// cannot encode, so the log encodes what was sent to the model (role, instructions, input, tools
+// and the forced tool) and nothing else.
+type requestLog []review.Request
+
+func (l requestLog) MarshalJSON() ([]byte, error) {
+	sent := make([]map[string]any, len(l))
+	for i, r := range l {
+		sent[i] = map[string]any{"role": r.Role, "instructions": r.Instructions, "input": r.Input, "tools": r.Tools, "force_tool": r.ForceTool}
+	}
+	return json.Marshal(sent)
+}
+
 // fakeEnv is a review's Env as a test scripts it: the model's answers and the verification
 // passes. It records what the reviewer asks of its caller. No Build is involved: the input is a
 // saved candidate in a temporary Git checkout and a run folder.
@@ -77,7 +90,7 @@ type fakeEnv struct {
 
 	mu        sync.Mutex
 	answers   []*provider.Response // one per Request, in order
-	requests  []review.Request
+	requests  requestLog
 	stages    []string            // the stage of every Save and "tool" for every Boundary, in order
 	saves     []review.Checkpoint // every Save
 	events    []map[string]any

@@ -16,6 +16,9 @@
               "path": {
                 "type": "string"
               },
+              "rule": {
+                "type": "string"
+              },
               "severity": {
                 "enum": [
                   "blocking",

@@ -91,6 +91,7 @@ func submitReviewDef() map[string]any {
 							"line":     integer(),
 							"severity": map[string]any{"type": "string", "enum": []any{"blocking", "note"}},
 							"message":  str(),
+							"rule":     str(),
 						},
 						"required": []any{"path", "line", "severity", "message"},
 					},

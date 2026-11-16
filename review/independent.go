@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-coordinator/route"
+	"github.com/KogenAI/kogen-coordinator/rules"
 	"github.com/KogenAI/kogen-executor/agent"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-loop/provider"
@@ -175,6 +177,10 @@ type Session struct {
 	// ran it up to this checkpoint: the review's account (account.go) sums them over a resume.
 	Blockers []string `json:"blockers,omitempty"`
 	WallMS   int64    `json:"wall_ms,omitempty"`
+	// StudioRules is the scoped Studio rule snapshot this review applies (its rules, content_hash,
+	// origin, retrieved_at and fallback_reason), retained so a resume keeps the rules the review
+	// started with and checks findings against them; absent when none was applied.
+	StudioRules *rules.Snapshot `json:"studio_rules,omitempty"`
 }
 
 // Encode is the JSON a checkpoint keeps of the session.
@@ -253,6 +259,16 @@ func (Independent) Review(ctx context.Context, in Input, env Env) (res Result, e
 		diagnostic = append(slices.Clone(diagnostic), map[string]any{"role": "user",
 			"content": "Staged plan context for this independent review." + nav})
 	}
+	// The scoped Studio rule snapshot is read first, before any material or model request: an
+	// unconfigured project reviews standalone, any other failure stops the review unchanged.
+	snap, err := rules.Load(ctx, in.Candidate.Root, rules.Options{})
+	if err != nil {
+		if errors.Is(err, rules.ErrNotConfigured) {
+			snap = nil
+		} else {
+			return Result{}, err
+		}
+	}
 	nativeTools := in.Tools.Native(ToolNames)
 	tools := reviewTools(nativeTools)
 	m, err := MaterialOf(in)
@@ -266,9 +282,12 @@ func (Independent) Review(ctx context.Context, in Input, env Env) (res Result, e
 	if err != nil {
 		return Result{}, err
 	}
+	if snap != nil {
+		input = append(slices.Clone(input), rulesMessage(snap))
+	}
 	base := pass
 	r.pass, r.base, r.tools, r.nativeTools = pass, &base, tools, nativeTools
-	r.sess = Session{Role: role, Input: input, Usage: core.ZeroTokens(), Seen: pass.Tree}
+	r.sess = Session{Role: role, Input: input, Usage: core.ZeroTokens(), Seen: pass.Tree, StudioRules: snap}
 	return r.loop(ctx, nil, "")
 }
 
@@ -425,7 +444,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	r.pass = pass
 	r.sess = Session{
 		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
-		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS,
+		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS, StudioRules: r.sess.StudioRules,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	return r.loop(ctx, nil, "")
@@ -618,7 +637,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	r.pass = final
 	r.sess = Session{
 		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
-		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS,
+		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS, StudioRules: r.sess.StudioRules,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
 	if err := r.save(route.StageReview); err != nil {
@@ -1030,6 +1049,10 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 		clean, ok := r.findingPath(path)
 		if !ok {
 			problems = append(problems, path+" is not a file of the repository")
+			continue
+		}
+		if rp := r.ruleProblem(f); rp != nil {
+			problems = append(problems, rp...)
 			continue
 		}
 		recorded := maps.Clone(f)
