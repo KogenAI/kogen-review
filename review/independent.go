@@ -439,6 +439,21 @@ func (r *run) seenTree() string {
 	return r.pass.Tree
 }
 
+// listedBlock is the text that returns the requirements of the accepted submissions of this
+// review to the reviewer: a later approval must list each of them again. It is empty when no
+// submission was accepted.
+func (r *run) listedBlock() string {
+	if len(r.sess.Listed) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\nRequirements already listed in this review (your next approval must list each of them, with this text and with evidence observed on the current tree):")
+	for _, l := range r.sess.Listed {
+		b.WriteString("\n- " + strings.Join(strings.Fields(l), " "))
+	}
+	return b.String()
+}
+
 // deliverySection tells the reviewer that the candidate changed after its contents were
 // delivered, with the exact diff against the seen tree. It is empty when the trees are equal.
 // It also returns the changed paths it computed.
@@ -557,6 +572,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		feedback += "Final verification of your repairs failed. Fix these failures and regressions from your edits; do not restart a whole-change critique. If observed evidence demonstrates a protected fixture defect, use submit_review changes with a blocking finding at that protected path instead of a production workaround, including a test-facing hidden comment.\n" +
 			env.Feedback(final, SubmitReviewTool)
 	}
+	feedback += r.listedBlock()
 	r.sess.RepairRounds++
 	ids := failureIdentities(final)
 	if final.Green {

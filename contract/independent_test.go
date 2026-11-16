@@ -726,3 +726,75 @@ func TestIndependentExhaustedRejectionShowsBothVerdicts(t *testing.T) {
 	line := `kogen: review 1: verdict not accepted (first of 2 problems): requirement "R1" has no evidence: probe it with shell against the candidate before the verdict`
 	deepEq(t, "exhausted-native progress", shownRejections(h), []string{line, line})
 }
+
+const repairListedHeader = "\n\nRequirements already listed in this review (your next approval must list each of them, with this text and with evidence observed on the current tree):"
+
+// repairFeedback runs a native review whose candidate changed after the first approval and
+// returns the feedback of its second request.
+func repairFeedback(t *testing.T, first string, passes func() []verify.Pass) string {
+	t.Helper()
+	in, h := newReview(t)
+	writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+	h.answers = []*provider.Response{submitReview(first), submitReview(first)}
+	h.verifies = passes()
+	if _, err := (review.Independent{}).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "repair feedback requests", len(h.requests), 2)
+	sent := h.requests[1].Input
+	last, _ := sent[len(sent)-1].(map[string]any)
+	content, _ := last["content"].(string)
+	return content
+}
+
+// greenRepairPass is the green final pass of the changed tree; otherTree is set by newReview, so
+// it is read only when the review has been built.
+func greenRepairPass() []verify.Pass {
+	return []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
+}
+
+const twoRequirements = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"test","ref":"t","met":true},{"requirement":"R2","evidence":"test","ref":"t","met":true}]}`
+
+// TestIndependentRepairFeedbackListsRequirementsAfterGreenPass pins that the feedback of a
+// green final pass ends with the requirements an accepted submission already listed.
+func TestIndependentRepairFeedbackListsRequirementsAfterGreenPass(t *testing.T) {
+	t.Parallel()
+	got := repairFeedback(t, twoRequirements, greenRepairPass)
+	if !strings.HasSuffix(got, "do not restart the whole critique."+repairListedHeader+"\n- R1\n- R2") {
+		t.Errorf("feedback: %q", got)
+	}
+}
+
+// TestIndependentRepairFeedbackListsRequirementsAfterFailedVerification pins the same block
+// after a failed final verification.
+func TestIndependentRepairFeedbackListsRequirementsAfterFailedVerification(t *testing.T) {
+	t.Parallel()
+	one := `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"test","ref":"t","met":true}]}`
+	got := repairFeedback(t, one, func() []verify.Pass {
+		return []verify.Pass{{N: 2, Clean: true, Green: false, Tree: otherTree, Failing: []string{"check:lint"}}, {N: 3, Clean: true, Green: true, Tree: otherTree}}
+	})
+	if !strings.Contains(got, "Final verification of your repairs failed.") || !strings.HasSuffix(got, repairListedHeader+"\n- R1") {
+		t.Errorf("feedback: %q", got)
+	}
+}
+
+// TestIndependentRepairFeedbackWithoutRequirementsHasNoBlock pins that nothing is appended when
+// no accepted submission listed a requirement.
+func TestIndependentRepairFeedbackWithoutRequirementsHasNoBlock(t *testing.T) {
+	t.Parallel()
+	got := repairFeedback(t, `{"verdict":"approve","findings":[]}`, greenRepairPass)
+	if !strings.HasSuffix(got, "do not restart the whole critique.") || strings.Contains(got, "Requirements already listed") {
+		t.Errorf("feedback: %q", got)
+	}
+}
+
+// TestIndependentRepairFeedbackCollapsesRequirementWhitespace pins that a listed requirement is
+// shown with each run of whitespace replaced by one space.
+func TestIndependentRepairFeedbackCollapsesRequirementWhitespace(t *testing.T) {
+	t.Parallel()
+	multi := `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1\n  second   line","evidence":"test","ref":"t","met":true}]}`
+	got := repairFeedback(t, multi, greenRepairPass)
+	if !strings.HasSuffix(got, "do not restart the whole critique."+repairListedHeader+"\n- R1 second line") {
+		t.Errorf("feedback: %q", got)
+	}
+}

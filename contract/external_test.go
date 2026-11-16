@@ -12,6 +12,7 @@ import (
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-executor/executor"
 	"github.com/KogenAI/kogen-review/review"
+	"github.com/KogenAI/kogen-verification/verify"
 )
 
 // TestExternalReviewApprovesInItsOwnSession pins the review kogen-build runs for an external
@@ -175,6 +176,31 @@ func TestExternalReviewRequirementsSkipTheProbeCheck(t *testing.T) {
 	}
 	eq(t, "external-acceptance feedback", x.inputs[1].Feedback,
 		`Not a valid verdict: requirement "R1" cites acceptance "S", which did not run on the current tree (not_run): naming a scenario is not evidence; cite a probe you ran with shell on the current tree that exercises the requirement, or, when nothing can verify it here, submit changes with a blocking finding that quotes the requirement and says its verification could not run. Submit a corrected structured verdict.`)
+}
+
+// TestExternalRepairFeedbackListsRequirements pins that the executor's feedback after the
+// candidate changed ends with the requirements an accepted submission already listed.
+func TestExternalRepairFeedbackListsRequirements(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	rounds := 0
+	in.Tools.Round = func(ctx context.Context, sess executor.Session, input executor.Input) (executor.RoundResult, error) {
+		rounds++
+		if rounds == 1 {
+			writeFile(t, filepath.Join(in.Candidate.Root, "app.txt"), otherText)
+		}
+		return sess.Round(ctx, input)
+	}
+	const two = `{"verdict":"approve","findings":[],"requirements":[{"requirement":"R1","evidence":"test","ref":"t","met":true},{"requirement":"R2","evidence":"test","ref":"t","met":true}]}`
+	x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(two), structured(two)}}
+	h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: otherTree}}
+	if _, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, "external-repair requests", len(x.inputs), 2)
+	if !strings.HasSuffix(x.inputs[1].Feedback, "do not restart the whole critique."+repairListedHeader+"\n- R1\n- R2") {
+		t.Errorf("external-repair feedback: %q", x.inputs[1].Feedback)
+	}
 }
 
 // TestExternalRejectedVerdictRecordsItsProblems pins that a rejected structured verdict records
