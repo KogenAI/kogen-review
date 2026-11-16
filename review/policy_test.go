@@ -168,7 +168,7 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	if strings.Contains(text, reviewerOldSentence) || strings.Count(text, reviewerBatchParagraph) != 1 {
 		t.Fatal("reviewer must replace exactly the old batching sentence")
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "1aaaf6582febb8b75c1c096e7e806803ffff29b66d6e69a17b69c2d1aaf45dde" {
+	if got := fmt.Sprintf("%x", sha256.Sum256([]byte(text))); got != "922cd41d5634d83100e8b80fbfe80cde2dd026acb0e29fa65d9b190d44b3ec31" {
 		t.Fatalf("reviewer hash = %s", got)
 	}
 	data, err := os.ReadFile("testdata/defs_golden.json")
@@ -185,6 +185,18 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	}
 	if !bytes.Equal(mustJSON(t, got), mustJSON(t, recorded[SubmitReviewTool])) {
 		t.Fatalf("review schema = %s", mustJSON(t, got))
+	}
+}
+
+// TestRequirementsRuleNamesWhatAnAcceptanceRefContains pins the ref clause of the rule.
+func TestRequirementsRuleNamesWhatAnAcceptanceRefContains(t *testing.T) {
+	const want = "ref (for test, the test; for acceptance, the scenario's name exactly as written after Scenario: in acceptance.feature, or the text of a step that occurs in that one scenario only, never a driver test or test method name; for probe, the exact shell command; empty for none)"
+	const old = "ref (the test or acceptance step, or the exact shell command of the probe; empty for none)"
+	if !strings.Contains(RequirementsRule, want) || strings.Contains(RequirementsRule, old) {
+		t.Fatal("RequirementsRule does not carry the new ref clause only")
+	}
+	if strings.Count(ReviewerInstructions(), want) != 1 || strings.Count(reviewTask, want) != 1 || strings.Count(reviewPartsTask, want) != 1 {
+		t.Fatal("a review text does not carry the new ref clause exactly once")
 	}
 }
 

@@ -468,6 +468,7 @@ func (x External) session(ctx context.Context, v *xreview, role project.Role, ev
 		if problems != nil {
 			if invalid >= 1 {
 				r.sess.Rejected = invalid
+				r.rejectedLine(problems)
 				err := r.invalidStop(problems, "rejected_verdict_exhausted", false)
 				return Result{Invalid: r.invalid}, err
 			}

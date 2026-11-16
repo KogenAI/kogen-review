@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,4 +202,45 @@ func TestExternalRejectedVerdictRecordsItsProblems(t *testing.T) {
 		}
 	}
 	deepEq(t, "rejected-problems progress", shown, []string{"kogen: review 1: verdict not accepted: " + problem})
+}
+
+// rejectedRequirements is an approve verdict whose n requirements each lack evidence, so the
+// verdict is rejected with n problems.
+func rejectedRequirements(n int) string {
+	var reqs []string
+	for i := 1; i <= n; i++ {
+		reqs = append(reqs, fmt.Sprintf(`{"requirement":"R%d","evidence":"none","ref":"","met":false}`, i))
+	}
+	return `{"verdict":"approve","findings":[],"requirements":[` + strings.Join(reqs, ",") + `]}`
+}
+
+func shownRejections(h *fakeEnv) []string {
+	var shown []string
+	for _, line := range h.progress {
+		if strings.HasPrefix(line, "kogen: review 1: verdict not accepted") {
+			shown = append(shown, line)
+		}
+	}
+	return shown
+}
+
+// TestExternalRejectedVerdictLineNamesTheProblemTotal pins that several problems name their
+// full total in the progress line, never the capped one, and that an exhausted rejection
+// writes its line too.
+func TestExternalRejectedVerdictLineNamesTheProblemTotal(t *testing.T) {
+	t.Parallel()
+	const first = `requirement "R1" has no evidence: probe it with shell against the candidate before the verdict`
+	in, h := newReview(t)
+	x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(rejectedRequirements(12)), structured(`{"verdict":"approve","findings":[]}`)}}
+	if _, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "twelve-problems progress", shownRejections(h), []string{"kogen: review 1: verdict not accepted (first of 12 problems): " + first})
+
+	in, h = newReview(t)
+	x = &fakeExecutor{t: t, results: []executor.RoundResult{structured(rejectedRequirements(2)), structured(rejectedRequirements(2))}}
+	_, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h)
+	wantError(t, "exhausted-external", err, "candidate", "review_invalid")
+	line := "kogen: review 1: verdict not accepted (first of 2 problems): " + first
+	deepEq(t, "exhausted-external progress", shownRejections(h), []string{line, line})
 }

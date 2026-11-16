@@ -935,6 +935,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			r.allowance("no_tool_turn", nil)
 		case problems != nil:
 			if r.sess.Rejected >= 1 {
+				r.rejectedLine(problems)
 				return Verdict{}, r.invalidStop(problems, "rejected_verdict_exhausted", false)
 			}
 			r.sess.Rejected++

@@ -714,3 +714,15 @@ func TestIndependentReviewHandsOnCollapsedBoundedFindings(t *testing.T) {
 	eq(t, "independent-findings file findings bytes", string(fileFindings), string(recordFindings))
 	eq(t, "independent-findings recorded", len(h.last.Findings), 50)
 }
+
+// TestIndependentExhaustedRejectionShowsBothVerdicts pins that a native review ended by a
+// second rejected verdict writes the progress line of both verdicts.
+func TestIndependentExhaustedRejectionShowsBothVerdicts(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	h.answers = []*provider.Response{submitReview(rejectedRequirements(2)), submitReview(rejectedRequirements(2))}
+	_, err := review.Independent{}.Review(context.Background(), in, h)
+	wantError(t, "exhausted-native", err, "candidate", "review_invalid")
+	line := `kogen: review 1: verdict not accepted (first of 2 problems): requirement "R1" has no evidence: probe it with shell against the candidate before the verdict`
+	deepEq(t, "exhausted-native progress", shownRejections(h), []string{line, line})
+}

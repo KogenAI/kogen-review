@@ -67,6 +67,20 @@ func cutAtWord(s string, n int) string {
 	return strings.TrimRightFunc(string(r[:room]), unicode.IsSpace) + progressMarker
 }
 
+// rejectedLine shows a rejected verdict's first problem in the progress. With more than one
+// problem the line names their total (the full list, not the recorded one).
+func (r *run) rejectedLine(problems []string) {
+	if len(problems) == 0 {
+		return
+	}
+	first := cutAtWord(problems[0], progressProblemRunes)
+	if len(problems) == 1 {
+		r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted: %s", r.in.Number, first))
+		return
+	}
+	r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted (first of %d problems): %s", r.in.Number, len(problems), first))
+}
+
 // allowance records a consumption of the review's allowances in the run log. A rejected
 // verdict also records its problems (the lines the reviewer is told, cut) and shows the first
 // one in the progress before the reviewer is asked again.
@@ -85,9 +99,7 @@ func (r *run) allowance(why string, problems []string) {
 		}
 		event["problems"] = kept
 		r.env.Event(event)
-		if len(problems) > 0 {
-			r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted: %s", r.in.Number, cutAtWord(problems[0], progressProblemRunes)))
-		}
+		r.rejectedLine(problems)
 		return
 	}
 	r.env.Event(event)
