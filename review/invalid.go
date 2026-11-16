@@ -2,6 +2,8 @@ package review
 
 import (
 	"fmt"
+	"strings"
+	"unicode"
 
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-loop/provider"
@@ -31,6 +33,40 @@ func cutRunes(s string, n int) string {
 	return s
 }
 
+// progressMarker ends a progress problem that was cut.
+const progressMarker = " ..."
+
+// cutAtWord returns s whole when it has at most n runes. Otherwise it returns the longest
+// whole-word prefix that, followed by progressMarker, has at most n runes in total; a word
+// boundary is whitespace and whitespace before the marker is trimmed. With no whitespace in
+// the room available it cuts on a rune boundary and appends the marker.
+func cutAtWord(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	room := n - len([]rune(progressMarker))
+	if room < 0 {
+		room = 0
+	}
+	end := room
+	if !unicode.IsSpace(r[room]) {
+		end = -1
+		for i := room - 1; i >= 0; i-- {
+			if unicode.IsSpace(r[i]) {
+				end = i
+				break
+			}
+		}
+	}
+	if end >= 0 {
+		if head := strings.TrimRightFunc(string(r[:end]), unicode.IsSpace); head != "" {
+			return head + progressMarker
+		}
+	}
+	return strings.TrimRightFunc(string(r[:room]), unicode.IsSpace) + progressMarker
+}
+
 // allowance records a consumption of the review's allowances in the run log. A rejected
 // verdict also records its problems (the lines the reviewer is told, cut) and shows the first
 // one in the progress before the reviewer is asked again.
@@ -50,7 +86,7 @@ func (r *run) allowance(why string, problems []string) {
 		event["problems"] = kept
 		r.env.Event(event)
 		if len(problems) > 0 {
-			r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted: %s", r.in.Number, cutRunes(problems[0], progressProblemRunes)))
+			r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted: %s", r.in.Number, cutAtWord(problems[0], progressProblemRunes)))
 		}
 		return
 	}
