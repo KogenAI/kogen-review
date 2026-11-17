@@ -15,6 +15,7 @@ import (
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-coordinator/route"
 	"github.com/KogenAI/kogen-executor/core"
+	"github.com/KogenAI/kogen-executor/executor"
 	"github.com/KogenAI/kogen-loop/provider"
 	"github.com/KogenAI/kogen-loop/sys"
 	"github.com/KogenAI/kogen-loop/tools"
@@ -454,4 +455,69 @@ func TestAResumedPostResetRefusalKeepsItsFeedback(t *testing.T) {
 	events := eventsNamed(t, h.fakeEnv, "review_window_reset")
 	eq(t, "reset-resumed events", len(events), 1)
 	eq(t, "reset-resumed trigger", events[0]["trigger"], any("feedback"))
+}
+
+// sharedSupportReview is a review whose candidate changed test/test_helper.rb, a file of its start
+// commit.
+func sharedSupportReview(t *testing.T) (review.Input, *fakeEnv) {
+	t.Helper()
+	in, h := newReview(t)
+	root := in.Candidate.Root
+	writeFile(t, filepath.Join(root, "test/test_helper.rb"), "# helper\n")
+	git(t, root, nil, "add", "test/test_helper.rb")
+	git(t, root, nil, "commit", "-q", "-m", "helper", "--", "test/test_helper.rb")
+	start := git(t, root, nil, "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(root, "test/test_helper.rb"), "# helper\n# changed\n")
+	tree, err := in.Candidate.Repo.Tree(start, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Candidate.Start, in.Candidate.Tree, in.Evidence.Pass.Tree = start, tree, tree
+	return in, h
+}
+
+// sourceEnv records the source of the material its Prepare is given (the native conversation's
+// opening carries it, a reset resends that opening unchanged).
+type sourceEnv struct {
+	*ceilingEnv
+	sources []string
+}
+
+func (h *sourceEnv) Prepare(tree string, m review.MaterialSet, role project.Role, instructions string, defs, diagnostic []any) ([]any, error) {
+	h.sources = append(h.sources, m.Source)
+	return []any{map[string]any{"role": "user", "content": m.Authority + "\n" + m.Source}}, nil
+}
+
+// TestSharedTestSupportLineOnceOnResetAndPartsRoutes pins that the shared test support line is in
+// the source once on the native route, in the opening a reset resends, and in the first part of
+// the parts route.
+func TestSharedTestSupportLineOnceOnResetAndPartsRoutes(t *testing.T) {
+	t.Parallel()
+	const line = "shared test support changed: test/test_helper.rb\n\n# Diff of existing/deleted paths"
+
+	in, base := sharedSupportReview(t)
+	h := &sourceEnv{ceilingEnv: &ceilingEnv{fakeEnv: base, opening: 0}, sources: nil}
+	h.refuseNext = 1
+	h.answers = []*provider.Response{answer(call("call-submit-1", "submit_review", approve)), answer(call("call-submit-2", "submit_review", approve))}
+	_, _ = review.Independent{}.Review(context.Background(), in, h)
+	eq(t, "reset refusals", len(h.refusals), 1)
+	if len(h.sources) == 0 || strings.Count(h.sources[0], line) != 1 || strings.Count(h.sources[0], "shared test support changed:") != 1 {
+		t.Errorf("native source does not carry the line once: %q", h.sources)
+	}
+	if len(h.inputs) < 2 || strings.Count(fmt.Sprint(h.inputs[1]), "shared test support changed: test/test_helper.rb") != 1 {
+		t.Error("the opening of the reset request does not carry the line once")
+	}
+
+	in, env := sharedSupportReview(t)
+	fake := &fakeExecutor{t: t, results: []executor.RoundResult{structured(`{"verdict":"approve","findings":[]}`)}}
+	if _, err := review.NewExternal(partsExecutor{fake}, externalDescriptor(), 4).Review(context.Background(), in, env); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.tasks) != 1 || !strings.HasPrefix(fake.tasks[0].Brief.Dynamic, "# Review part ") {
+		t.Fatalf("not a parts delivery: %d tasks", len(fake.tasks))
+	}
+	text := fake.tasks[0].Brief.Dynamic
+	eq(t, "parts line count", strings.Count(text, "shared test support changed:"), 1)
+	eq(t, "parts line before the diff", strings.Count(text, line), 1)
+	eq(t, "parts rule count", strings.Count(fake.tasks[0].Brief.Stable, review.SharedTestSupportRule), 1)
 }

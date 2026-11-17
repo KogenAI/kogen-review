@@ -25,6 +25,11 @@ const LimitRaises = "Limit raises: a change that raises a timeout, deadline, ret
 // the native reviewer's instructions and the external review task both carry it.
 const RequirementsRule = "Requirements: before any verdict, work through the approved Intent's concrete, observable requirements one by one and name, for each, the evidence that the candidate meets it: an existing test or acceptance step that exercises it, or a probe you ran with shell against the candidate in this review. A test or step is evidence only for the inputs it exercises: when a requirement states or implies an empty, zero or limit input that none exercises, that input needs a probe. Probe each requirement without evidence before the verdict, in your probe round, with a small focused run of the inputs it states or implies, including that empty, zero or limit input. A probe that shows the behavior missing or wrong is a substantive defect: repair it with regression coverage or, when that is not possible within the approved scope, submit changes with a blocking finding whose message quotes the requirement. Sentences that are not observable, such as a statement of purpose, and wording that only restates the acceptance scenarios need no probe of their own. Record the mapping in submit_review's requirements, one entry per requirement: requirement (quoted from the Intent), evidence (test, acceptance, probe, or none while nothing exercises it), ref (for test, the test; for acceptance, the scenario's name exactly as written after Scenario: in acceptance.feature, or the text of a step that occurs in that one scenario only, never a driver test or test method name; for probe, the exact shell command; empty for none) and met (whether that evidence shows the candidate meets the requirement). Kogen rejects an approval with an entry whose evidence is none or whose met is false and, when it sees your tool calls, one whose probe command did not run in this review; a changes verdict quotes each unmet requirement in a blocking finding."
 
+// SharedTestSupportRule is the review rule on edits to shared test support (the review source's
+// `shared test support changed:` line); the native reviewer's instructions and the external
+// review task both carry it.
+const SharedTestSupportRule = "Shared test support: when the review source has a line starting `shared test support changed:` and the approved Intent does not name those paths, repair it: restore each listed shared file byte for byte and move the behaviour the candidate needs into a helper or override beside the candidate's own new test files; when that cannot be done within the Intent, submit changes with a blocking finding naming the path and the line. A path the Intent names is not an issue."
+
 // unsupportedClaimsRule distinguishes incidental candidate claims from required outcomes.
 const unsupportedClaimsRule = `Consult the approved Intent and actual review evidence to distinguish required outcomes from incidental candidate-authored claims. Do not invent measurements.
 Unsupported candidate-authored prose or figures in documentation, comments or changelogs are scoped repairs when the approved Intent does not require the claimed outcome: remove the claim or restate only what you actually measured, verify the repair, and approve if no substantive blockers remain.
@@ -45,7 +50,7 @@ func promptFile(name string) string {
 // ReviewerInstructions are the native reviewer's instructions, byte for byte what the model
 // receives: the reviewer prompt and the limit-raise rule.
 func ReviewerInstructions() string {
-	return promptFile("reviewer") + "\n" + LimitRaises + "\n" + RequirementsRule + "\n" + unsupportedClaimsRule + "\n"
+	return promptFile("reviewer") + "\n" + LimitRaises + "\n" + RequirementsRule + "\n" + SharedTestSupportRule + "\n" + unsupportedClaimsRule + "\n"
 }
 
 // ReviewerToolDefinitions returns the model-facing definition of each named tool, in order: the

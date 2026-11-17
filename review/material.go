@@ -294,8 +294,12 @@ func MaterialOf(in Input) (MaterialSet, error) {
 		"Acceptance: " + acceptanceRun + ".\n\n"
 
 	results := pass.Results()
+	sharedLine, err := sharedTestSupportLine(repo, c.Start, pass.Tree, catalog)
+	if err != nil {
+		return MaterialSet{}, err
+	}
 	layout := partsLayout{
-		head: strings.ToValidUTF8("# Check results of the final pass\n\n"+results+"\n\n"+
+		head: strings.ToValidUTF8("# Check results of the final pass\n\n"+results+"\n\n"+sharedLine+
 			"# Diff of existing/deleted paths against start HEAD "+short(c.Start)+"\n\n", "�"),
 		blocks: blocks,
 		mid: "\n" + partsHeading + "\n\n" +
@@ -307,6 +311,83 @@ func MaterialOf(in Input) (MaterialSet, error) {
 	source := layout.source()
 	set := MaterialSet{Authority: authority, Source: source, Files: catalog, Checks: results, Texts: texts, PartsSource: source, PartsTexts: texts, layout: layout}
 	return set, nil
+}
+
+// sharedTestSupportLine is the source line naming the changed shared test support paths (the
+// catalog entries with status changed that are not renames) followed by a blank line, or "" when
+// there is none.
+func sharedTestSupportLine(repo *git.Repo, start, tree string, catalog []map[string]any) (string, error) {
+	var paths []string
+	for _, f := range catalog {
+		path, _ := f["path"].(string)
+		if f["status"] != "changed" || f["rename"] == true {
+			continue
+		}
+		support := isSharedTestSupportPath(path)
+		if !support && manifestNames[pathBase(path)] {
+			d, err := repo.OK("diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", start, tree, "--", ":(literal)"+path)
+			if err != nil {
+				return "", err
+			}
+			support = !plainVersionBump(d)
+		}
+		if support {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return "", nil
+	}
+	return "shared test support changed: " + strings.Join(paths, ", ") + "\n\n", nil
+}
+
+var (
+	sharedBaseNames  = map[string]bool{"test_helper.rb": true, "spec_helper.rb": true, "rails_helper.rb": true, "conftest.py": true, "setup_tests.js": true, "setup-tests.ts": true}
+	supportDirNames  = map[string]bool{"test_helpers": true, "test_support": true, "spec_support": true, "support": true}
+	testRootDirNames = map[string]bool{"test": true, "tests": true, "spec": true, "features": true}
+	manifestNames    = map[string]bool{"Gemfile": true, "Gemfile.lock": true, "package.json": true, "package-lock.json": true, "go.mod": true, "go.sum": true, "mix.exs": true, "mix.lock": true, "pyproject.toml": true, "requirements.txt": true}
+	versionRunRe     = regexp.MustCompile(`[0-9][0-9A-Za-z.+_-]*`)
+)
+
+func pathBase(path string) string { return path[strings.LastIndex(path, "/")+1:] }
+
+// isSharedTestSupportPath reports whether a path of the start commit is a file every test loads
+// by its name or place (the dependency manifests are judged by their diff).
+func isSharedTestSupportPath(path string) bool {
+	if sharedBaseNames[pathBase(path)] || path == "config/environments/test.rb" {
+		return true
+	}
+	dirs := strings.Split(path, "/")
+	dirs = dirs[:len(dirs)-1]
+	underTest := false
+	for _, d := range dirs {
+		if underTest && supportDirNames[d] {
+			return true
+		}
+		if testRootDirNames[d] {
+			underTest = true
+		}
+	}
+	return false
+}
+
+// plainVersionBump reports whether the removed and added lines of a -U0 diff pair up in order
+// and are equal once every version-like run is replaced by 0.
+func plainVersionBump(diff string) bool {
+	var removed, added []string
+	inHunk := false
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case !inHunk:
+		case strings.HasPrefix(line, "-"):
+			removed = append(removed, versionRunRe.ReplaceAllString(line[1:], "0"))
+		case strings.HasPrefix(line, "+"):
+			added = append(added, versionRunRe.ReplaceAllString(line[1:], "0"))
+		}
+	}
+	return slices.Equal(removed, added)
 }
 
 func renameDiff(repo *git.Repo, start, tree, origin, dest string) (string, error) {

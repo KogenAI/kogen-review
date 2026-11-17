@@ -164,7 +164,11 @@ func TestReviewerBatchPromptBytesAndUnchangedSchema(t *testing.T) {
 	if strings.Count(text, RequirementsRule) != 1 {
 		t.Fatal("reviewer must carry the requirements rule once")
 	}
+	if strings.Count(text, SharedTestSupportRule) != 1 {
+		t.Fatal("reviewer must carry the shared test support rule once")
+	}
 	text = strings.Replace(text, "\n"+LimitRaises+"\n", "", 1)
+	text = strings.Replace(text, "\n"+SharedTestSupportRule+"\n", "\n", 1)
 	if strings.Contains(text, reviewerOldSentence) || strings.Count(text, reviewerBatchParagraph) != 1 {
 		t.Fatal("reviewer must replace exactly the old batching sentence")
 	}
@@ -205,7 +209,7 @@ func TestRequirementsRuleNamesWhatAnAcceptanceRefContains(t *testing.T) {
 func TestExternalReviewTaskCarriesTheRequirementsRule(t *testing.T) {
 	const final = "Finish with the structured verdict: verdict approve or changes, findings {path, line, severity blocking|note, message} and requirements {requirement, evidence test|acceptance|probe|none, ref, met}. A changes verdict needs a blocking finding; an approve verdict has none."
 	for name, task := range map[string]string{"reviewTask": reviewTask, "reviewPartsTask": reviewPartsTask} {
-		if strings.Count(task, RequirementsRule) != 1 || !strings.Contains(task, LimitRaises+"\n"+RequirementsRule+"\n"+unsupportedClaimsRule+"\n"+final) {
+		if strings.Count(task, RequirementsRule) != 1 || !strings.Contains(task, LimitRaises+"\n"+RequirementsRule+"\n"+SharedTestSupportRule+"\n"+unsupportedClaimsRule+"\n"+final) {
 			t.Errorf("%s does not carry the requirements rule after the limit rule and the new final sentence", name)
 		}
 	}

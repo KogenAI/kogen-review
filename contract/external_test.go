@@ -270,3 +270,21 @@ func TestExternalRejectedVerdictLineNamesTheProblemTotal(t *testing.T) {
 	line := "kogen: review 1: verdict not accepted (first of 2 problems): " + first
 	deepEq(t, "exhausted-external progress", shownRejections(h), []string{line, line})
 }
+
+// TestSharedTestSupportRuleOncePerRoute pins that the one-session external task carries the
+// shared test support rule once, and that a candidate with no changed shared test support gets no
+// `shared test support changed:` line.
+func TestSharedTestSupportRuleOncePerRoute(t *testing.T) {
+	t.Parallel()
+	in, h := newReview(t)
+	x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(`{"verdict":"approve","findings":[]}`)}}
+	if _, err := review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h); err != nil {
+		t.Fatal(err)
+	}
+	text := x.tasks[0].Brief.Stable + x.tasks[0].Brief.Dynamic
+	eq(t, "rule count", strings.Count(text, review.SharedTestSupportRule), 1)
+	eq(t, "line count", strings.Count(text, "shared test support changed:"), strings.Count(review.SharedTestSupportRule, "shared test support changed:"))
+	if !strings.Contains(review.ReviewerInstructions(), review.SharedTestSupportRule+"\n") || strings.Count(review.ReviewerInstructions(), review.SharedTestSupportRule) != 1 {
+		t.Error("the native instructions do not carry the rule once")
+	}
+}
