@@ -1,0 +1,41 @@
+{
+  "correct": {
+    "files": {
+      "review/reminder_test.go": "package review\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestReminderToolForcesReadFileWhileUnread(t *testing.T) {\n\tif got := reminderTool([]string{\"p1\"}); got != \"read_file\" {\n\t\tt.Errorf(\"reminderTool with one unread part = %q, want read_file\", got)\n\t}\n\tif got := reminderTool(nil); got != SubmitReviewTool {\n\t\tt.Errorf(\"reminderTool with no unread parts = %q, want %q\", got, SubmitReviewTool)\n\t}\n}\n\nfunc TestReminderTextWithoutUnreadCallsSubmitReview(t *testing.T) {\n\tgot := reminderText([]string{\"first problem\", \"second problem\"}, nil)\n\twant := \"Not a valid verdict: first problem; second problem. Call submit_review.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q, want %q\", got, want)\n\t}\n}\n\nfunc TestReminderTextNamesUnreadPartsInOrder(t *testing.T) {\n\tgot := reminderText([]string{\"unread parts\"}, []string{\"p1\", \"p2\"})\n\twant := \"Not a valid verdict: unread parts. 2 pinned part(s) unread; call read_file on p1, p2 before a verdict.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q, want %q\", got, want)\n\t}\n}\n\nfunc TestReminderTextCapsNamedPartsNotTheCount(t *testing.T) {\n\tvar unread []string\n\tfor i := 1; i <= 10; i++ {\n\t\tunread = append(unread, fmt.Sprintf(\"p%d\", i))\n\t}\n\tgot := reminderText([]string{\"unread parts\"}, unread)\n\twant := \"Not a valid verdict: unread parts. 10 pinned part(s) unread; call read_file on p1, p2, p3, p4, p5, p6, p7, p8 before a verdict.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q, want %q\", got, want)\n\t}\n\tfor _, id := range []string{\"p9\", \"p10\"} {\n\t\tif strings.Contains(got, id) {\n\t\t\tt.Errorf(\"reminderText names %s beyond the cap of %d: %q\", id, maxReminderParts, got)\n\t\t}\n\t}\n}\n"
+    }
+  },
+  "wrong": [
+    {
+      "name": "tool test checks only the no-unread case",
+      "scenario": "A reminder that never forces read_file is noticed",
+      "step": "Then climb-review-900: a test of review/reminder_test.go fails",
+      "files": {
+        "review/reminder_test.go": "package review\n\nimport (\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestReminderTool(t *testing.T) {\n\tif got := reminderTool(nil); got != SubmitReviewTool {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n}\n\nfunc TestReminderText(t *testing.T) {\n\tgot := reminderText([]string{\"first problem\", \"second problem\"}, nil)\n\tif got != \"Not a valid verdict: first problem; second problem. Call submit_review.\" {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, []string{\"p1\", \"p2\"})\n\twant := \"Not a valid verdict: unread parts. 2 pinned part(s) unread; call read_file on p1, p2 before a verdict.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tvar ids []string\n\tfor _, id := range []string{\"p1\", \"p2\", \"p3\", \"p4\", \"p5\", \"p6\", \"p7\", \"p8\", \"p9\", \"p10\"} {\n\t\tids = append(ids, id)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, ids)\n\tif !strings.Contains(got, \"10 pinned part(s)\") || strings.Contains(got, \"p9\") || !strings.Contains(got, \"p8\") {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n}\n"
+      }
+    },
+    {
+      "name": "text test checks only a substring",
+      "scenario": "A changed separator between problems is noticed",
+      "step": "Then climb-review-900: a test of review/reminder_test.go fails",
+      "files": {
+        "review/reminder_test.go": "package review\n\nimport (\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestReminderTool(t *testing.T) {\n\tif got := reminderTool([]string{\"p1\"}); got != \"read_file\" {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n\tif got := reminderTool(nil); got != SubmitReviewTool {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n}\n\nfunc TestReminderText(t *testing.T) {\n\tgot := reminderText([]string{\"first problem\", \"second problem\"}, nil)\n\tif !strings.Contains(got, \"submit_review\") {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, []string{\"p1\", \"p2\"})\n\twant := \"Not a valid verdict: unread parts. 2 pinned part(s) unread; call read_file on p1, p2 before a verdict.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tvar ids []string\n\tfor _, id := range []string{\"p1\", \"p2\", \"p3\", \"p4\", \"p5\", \"p6\", \"p7\", \"p8\", \"p9\", \"p10\"} {\n\t\tids = append(ids, id)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, ids)\n\tif !strings.Contains(got, \"10 pinned part(s)\") || strings.Contains(got, \"p9\") || !strings.Contains(got, \"p8\") {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n}\n"
+      }
+    },
+    {
+      "name": "text test does not assert the count or the id order",
+      "scenario": "A dropped count of unread parts is noticed",
+      "step": "Then climb-review-900: a test of review/reminder_test.go fails",
+      "files": {
+        "review/reminder_test.go": "package review\n\nimport (\n\t\"strings\"\n\t\"testing\"\n)\n\nfunc TestReminderTool(t *testing.T) {\n\tif got := reminderTool([]string{\"p1\"}); got != \"read_file\" {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n\tif got := reminderTool(nil); got != SubmitReviewTool {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n}\n\nfunc TestReminderText(t *testing.T) {\n\tgot := reminderText([]string{\"first problem\", \"second problem\"}, nil)\n\tif got != \"Not a valid verdict: first problem; second problem. Call submit_review.\" {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, []string{\"p1\", \"p2\"})\n\tif !strings.Contains(got, \"p1\") || !strings.Contains(got, \"p2\") {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tvar ids []string\n\tfor _, id := range []string{\"p1\", \"p2\", \"p3\", \"p4\", \"p5\", \"p6\", \"p7\", \"p8\", \"p9\", \"p10\"} {\n\t\tids = append(ids, id)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, ids)\n\tif strings.Contains(got, \"p9\") || !strings.Contains(got, \"p8\") {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n}\n"
+      }
+    },
+    {
+      "name": "text test uses fewer unread ids than the cap",
+      "scenario": "A removed cap on the named unread ids is noticed",
+      "step": "Then climb-review-900: a test of review/reminder_test.go fails",
+      "files": {
+        "review/reminder_test.go": "package review\n\nimport \"testing\"\n\nfunc TestReminderTool(t *testing.T) {\n\tif got := reminderTool([]string{\"p1\"}); got != \"read_file\" {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n\tif got := reminderTool(nil); got != SubmitReviewTool {\n\t\tt.Errorf(\"reminderTool = %q\", got)\n\t}\n}\n\nfunc TestReminderText(t *testing.T) {\n\tgot := reminderText([]string{\"first problem\", \"second problem\"}, nil)\n\tif got != \"Not a valid verdict: first problem; second problem. Call submit_review.\" {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, []string{\"p1\", \"p2\"})\n\twant := \"Not a valid verdict: unread parts. 2 pinned part(s) unread; call read_file on p1, p2 before a verdict.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n\tgot = reminderText([]string{\"unread parts\"}, []string{\"p1\", \"p2\", \"p3\"})\n\twant = \"Not a valid verdict: unread parts. 3 pinned part(s) unread; call read_file on p1, p2, p3 before a verdict.\"\n\tif got != want {\n\t\tt.Errorf(\"reminderText = %q\", got)\n\t}\n}\n"
+      }
+    }
+  ]
+}
