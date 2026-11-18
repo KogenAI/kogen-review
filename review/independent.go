@@ -1048,7 +1048,7 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 		}
 		clean, ok := r.findingPath(path)
 		if !ok {
-			problems = append(problems, path+" is not a file of the repository")
+			problems = append(problems, path+" is not a file of the repository"+r.pathHint(path))
 			continue
 		}
 		if rp := r.ruleProblem(f); rp != nil {
@@ -1186,6 +1186,44 @@ func (r *run) findingPath(path string) (string, bool) {
 		}
 	}
 	return clean, inStart(r.in.Candidate, clean)
+}
+
+// pathHint is the hint appended to the refusal of a finding path that is not a file of the
+// repository: "; did you mean MATCH" when exactly one path of the catalog of changed paths is a
+// path suffix of the cited path or has it as a path suffix (whole components, after cleaning the
+// cited path), otherwise "". It reads no catalog for a path that is absolute, leaves the root or
+// exists in the checkout, and gives no hint when the catalog cannot be read.
+func (r *run) pathHint(path string) string {
+	if filepath.IsAbs(path) {
+		return ""
+	}
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return ""
+	}
+	if _, err := os.Lstat(filepath.Join(r.in.Candidate.Root, filepath.FromSlash(clean))); err == nil {
+		return ""
+	}
+	set, err := MaterialOf(r.in)
+	if err != nil {
+		return ""
+	}
+	suffix := func(whole, tail string) bool { return whole == tail || strings.HasSuffix(whole, "/"+tail) }
+	match := ""
+	for _, f := range set.Files {
+		p, _ := f["path"].(string)
+		if p == "" || !suffix(clean, p) && !suffix(p, clean) {
+			continue
+		}
+		if match != "" && match != p {
+			return ""
+		}
+		match = p
+	}
+	if match == "" {
+		return ""
+	}
+	return "; did you mean " + match
 }
 
 // requirementSuffix ends the problems of evidence that cannot be established here.

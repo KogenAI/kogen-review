@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KogenAI/kogen-executor/executor"
 	"github.com/KogenAI/kogen-review/review"
 	"github.com/KogenAI/kogen-verification/verify"
 )
@@ -419,4 +421,69 @@ func TestValidateCollapsesDuplicateFindings(t *testing.T) {
 		t.Fatal("validate-findings first copy: not accepted")
 	}
 	eq(t, "validate-findings first copy message", fmt.Sprint(verdict.Findings[0]["message"]), " m ")
+}
+
+// TestValidateRefusalNamesTheOneChangedFileItMatches pins the hint of a refused finding path
+// through review.Validate and the external review: exactly one changed path matching by
+// whole-component suffix in either direction gives "; did you mean MATCH"; none, several, an
+// escaping or an existing path give the text as before.
+func TestValidateRefusalNamesTheOneChangedFileItMatches(t *testing.T) {
+	t.Parallel()
+	const refused = " is not a file of the repository"
+	for _, tc := range []struct {
+		name    string
+		changed []string
+		path    string
+		want    string
+	}{
+		{"doubled prefix", []string{"lib/studio_web.ex"}, "lib/studio_web/lib/studio_web.ex", "lib/studio_web/lib/studio_web.ex" + refused + "; did you mean lib/studio_web.ex"},
+		{"cited is a suffix", []string{"app/a/config.ex"}, "config.ex", "config.ex" + refused + "; did you mean app/a/config.ex"},
+		{"cleaned first", []string{"lib/studio_web.ex"}, "x/../lib/studio_web.ex/./lib/studio_web.ex", "x/../lib/studio_web.ex/./lib/studio_web.ex" + refused + "; did you mean lib/studio_web.ex"},
+		{"no match", []string{"lib/studio_web.ex"}, "missing.txt", "missing.txt" + refused},
+		{"whole components only", []string{"web.ex"}, "studio_web.ex", "studio_web.ex" + refused},
+		{"two matches", []string{"app/a/config.ex", "app/b/config.ex"}, "config.ex", "config.ex" + refused},
+		{"leaves the root", []string{"outside.txt"}, "../outside.txt", "../outside.txt" + refused},
+		{"leaves the root inside", []string{"outside.txt"}, "dir/../../outside.txt", "dir/../../outside.txt" + refused},
+		{"absolute", []string{"outside.txt"}, "/outside.txt", "/outside.txt" + refused},
+		{"link", []string{"dir/link.txt"}, "link.txt", "link.txt" + refused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in, h := newReview(t)
+			outside := filepath.Join(filepath.Dir(in.Candidate.Root), "outside.txt")
+			writeFile(t, outside, "OUTSIDE-CONTENT-5c1e\n")
+			if err := os.Symlink("../outside.txt", filepath.Join(in.Candidate.Root, "link.txt")); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range tc.changed {
+				full := filepath.Join(in.Candidate.Root, filepath.FromSlash(f))
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, full, "changed\n")
+			}
+			tree, err := in.Candidate.Repo.Tree(in.Candidate.Start, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in.Candidate.Tree = tree
+			in.Evidence.Pass.Tree = tree
+			finding := map[string]any{"path": tc.path, "line": 1, "severity": "blocking", "message": "m"}
+			args := map[string]any{"verdict": "changes", "findings": []any{finding}}
+			raw, err := json.Marshal(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, problems, err := review.Validate(in, h, decodeArgs(t, string(raw)), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			deepEq(t, "validate-hint native "+tc.name, problems, []string{tc.want})
+			x := &fakeExecutor{t: t, results: []executor.RoundResult{structured(string(raw)), structured(string(raw))}}
+			_, _ = review.NewExternal(x, externalDescriptor(), 4).Review(context.Background(), in, h)
+			if len(x.inputs) < 2 || !strings.Contains(x.inputs[1].Feedback, tc.want+". Submit a corrected structured verdict.") {
+				t.Errorf("validate-hint external %s: feedback does not carry the same problem %q", tc.name, tc.want)
+			}
+		})
+	}
 }
