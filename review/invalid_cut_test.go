@@ -37,3 +37,25 @@ func TestCutAtWord(t *testing.T) {
 		t.Errorf("multi-byte: %q", multi)
 	}
 }
+
+func TestCutProblemKeepsReason(t *testing.T) {
+	statement := func(runes int) string {
+		return string([]rune(strings.TrimSuffix(strings.Repeat("abcdefghij ", runes/11+1), " "))[:runes])
+	}
+	reason := "has no evidence: probe it with shell against the candidate before the verdict"
+	long := strings.Repeat("and cite the exact command that ran, the tree it ran on and the exit status ", 2) + "end"
+	cases := []struct {
+		name, in, want string
+	}{
+		{"short", `requirement "` + statement(40) + `" ` + reason, `requirement "` + statement(40) + `" ` + reason},
+		{"long statement", `requirement "` + statement(400) + `" ` + reason, `requirement "` + strings.TrimSuffix(strings.Repeat("abcdefghij ", 5), " ") + ` ..." ` + reason},
+		{"no room", `requirement "` + statement(400) + `" ` + long, `requirement " ..." ` + long},
+		{"no quoted requirement", statement(200), strings.TrimSuffix(strings.Repeat("abcdefghij ", 14), " ") + " ..."},
+		{"no closing quote", `requirement "` + statement(400), cutAtWord(`requirement "`+statement(400), progressProblemRunes)},
+	}
+	for _, c := range cases {
+		if got := cutProblem(c.in, progressProblemRunes); got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
+	}
+}

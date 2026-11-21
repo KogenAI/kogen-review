@@ -67,13 +67,38 @@ func cutAtWord(s string, n int) string {
 	return strings.TrimRightFunc(string(r[:room]), unicode.IsSpace) + progressMarker
 }
 
+// quotedRequirementPrefix opens a problem that names a requirement by its quoted statement.
+const quotedRequirementPrefix = `requirement "`
+
+// cutProblem returns a problem of at most n runes whole. A longer problem that starts with a
+// quoted requirement keeps the text after the closing quote (the reason) whole and shortens the
+// quoted statement, inside its quotes, to the room left in n runes; with no room the statement
+// is the cut marker alone and the result may pass n runes. Any other long problem is cut at n
+// runes by cutAtWord.
+func cutProblem(s string, n int) string {
+	if len([]rune(s)) <= n {
+		return s
+	}
+	if rest, ok := strings.CutPrefix(s, quotedRequirementPrefix); ok {
+		if i := strings.Index(rest, `" `); i >= 0 {
+			statement, reason := rest[:i], rest[i:]
+			room := n - len([]rune(quotedRequirementPrefix)) - len([]rune(reason))
+			if room < 0 {
+				room = 0
+			}
+			return quotedRequirementPrefix + cutAtWord(statement, room) + reason
+		}
+	}
+	return cutAtWord(s, n)
+}
+
 // rejectedLine shows a rejected verdict's first problem in the progress. With more than one
 // problem the line names their total (the full list, not the recorded one).
 func (r *run) rejectedLine(problems []string) {
 	if len(problems) == 0 {
 		return
 	}
-	first := cutAtWord(problems[0], progressProblemRunes)
+	first := cutProblem(problems[0], progressProblemRunes)
 	if len(problems) == 1 {
 		r.env.Progress(fmt.Sprintf("kogen: review %d: verdict not accepted: %s", r.in.Number, first))
 		return
