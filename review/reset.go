@@ -87,7 +87,7 @@ func (r *run) measure(input []any, force string) (tools.Measurement, error) {
 // Env's refusal) by the unchanged mandatory opening, one bounded handoff and Kogen's newest
 // undelivered messages, archives the replaced conversation and returns the event to record. It
 // returns refused unchanged, without a record, when the mandatory material does not fit.
-func (r *run) reset(refused error, force string, overBudget bool) (map[string]any, string, error) {
+func (r *run) reset(refused error, force *string, notice *string) (map[string]any, string, error) {
 	env := r.env
 	w := r.sess.Input
 
@@ -127,24 +127,40 @@ func (r *run) reset(refused error, force string, overBudget bool) (map[string]an
 			feedback = append(feedback, map[string]any{"role": "user", "content": text})
 		case m["role"] == "user":
 			content, isText := m["content"].(string)
-			if isText && content != reviewBudgetNotice && !isHandoff(item) {
+			if isText && !strings.HasPrefix(content, reviewBudgetNotice) && !isHandoff(item) {
 				feedback = append(feedback, map[string]any{"role": "user", "content": content})
 			}
 		}
 	}
 
-	mandatory := slices.Concat(opening, feedback)
-	if overBudget {
-		mandatory = budgetNotice(mandatory)
+	unread, err := env.Unread(delivered)
+	if err != nil {
+		return nil, "", err
 	}
-	mandatoryM, err := r.measure(mandatory, force)
+	if len(r.sess.Windows) > 0 {
+		unread = keepIn(unread, r.sess.ResetUnread)
+	}
+
+	// A refused request did not deliver pending reads. Refresh both forms of guidance.
+	if *notice != "" && !r.external {
+		*notice = reviewBudgetNotice + reminderText(nil, unread)
+		if *force != "" {
+			*force = reminderTool(unread)
+		}
+	}
+
+	mandatory := slices.Concat(opening, feedback)
+	if *notice != "" {
+		mandatory = budgetNotice(mandatory, *notice)
+	}
+	mandatoryM, err := r.measure(mandatory, *force)
 	if err != nil {
 		return nil, "", err
 	}
 	if !mandatoryM.Fits {
 		return nil, "", refused
 	}
-	before, err := r.measure(w, force)
+	before, err := r.measure(w, *force)
 	if err != nil {
 		return nil, "", err
 	}
@@ -161,14 +177,6 @@ func (r *run) reset(refused error, force string, overBudget bool) (map[string]an
 	}
 	window := Window{File: file, SHA256: core.HashHex(encoded)}
 
-	unread, err := env.Unread(delivered)
-	if err != nil {
-		return nil, "", err
-	}
-	if len(r.sess.Windows) > 0 {
-		unread = keepIn(unread, r.sess.ResetUnread)
-	}
-
 	note, err := core.EncodeJSON(map[string]any{
 		"version": 1, "review": n, "window": map[string]any{"file": window.File, "sha256": window.SHA256},
 		"unread_parts": len(unread), "note": resetNote,
@@ -178,10 +186,10 @@ func (r *run) reset(refused error, force string, overBudget bool) (map[string]an
 	}
 	handoff := map[string]any{"role": "user", "content": resetHeader + string(note)}
 	input := slices.Concat(opening, []any{handoff}, feedback)
-	if overBudget {
-		input = budgetNotice(input)
+	if *notice != "" {
+		input = budgetNotice(input, *notice)
 	}
-	m, err := r.measure(input, force)
+	m, err := r.measure(input, *force)
 	if err != nil {
 		return nil, "", err
 	}

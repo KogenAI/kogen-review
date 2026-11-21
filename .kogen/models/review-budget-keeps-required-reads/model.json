@@ -1,0 +1,13 @@
+{
+  "None": false,
+  "Path": ".kogen/models/review-budget-keeps-required-reads/model.qnt",
+  "Invariants": [
+    "ReadBeforeApproval",
+    "BoundedStalls",
+    "Persistent",
+    "ReadPrompt"
+  ],
+  "Seed": "19",
+  "Samples": "100",
+  "Steps": "30"
+}

@@ -131,11 +131,11 @@ type Session struct {
 	// consecutive prose-only turns, at most noToolReminderCap times, independently of each
 	// other. Restored: the reviewer made a tool call since the last reminder, so the next
 	// prose-only turn gets a reminder again. ProseTurns, ForcedRequests (the answered requests
-	// that required submit_review) and ForcedAnswered (those answered with a tool call) count
+	// that required a tool) and ForcedAnswered (those answered with a tool call) count
 	// the review's turns for the record of a review that ends because of prose-only turns.
-	// Remind marks the pending reminder: the next request requires submit_review where the
-	// route supports it.
-	// PrevUnread is the unread-part count of the last unread rejection (the progress
+	// Remind marks the pending reminder: the next request requires read_file while parts
+	// are unread, otherwise submit_review, where the route supports it.
+	// PrevUnread is the unread-part count of the last unread rejection or post-target turn (the progress
 	// exemption). Reopened marks the reopened conversation of a blocked review. All of them
 	// travel with the checkpoint, so an interruption or a working-window reset keeps them.
 	Rejected       int  `json:"rejected_verdicts,omitempty"`
@@ -710,22 +710,27 @@ func failureIdentities(p verify.Pass) []string {
 
 // converse is the reviewer's requests and tool calls until it submits a valid verdict. Two
 // allowances, spent independently: a rejected submit_review is sent back with its problems once,
-// and a prose-only turn is sent back with a reminder (the next request requires submit_review
-// where the route supports it) once per run of consecutive prose-only turns: a tool call since
-// the last reminder restores it, up to noToolReminderCap reminders per review. Spending an
+// and a prose-only turn is sent back with a reminder (the next request requires read_file
+// while parts are unread, otherwise submit_review, where the route supports it) once per run
+// of consecutive prose-only turns: a tool call since the last reminder restores it, up to
+// noToolReminderCap reminders per review. Spending an
 // allowance again ends this review without a verdict (run.invalidStop).
-const reviewBudgetNotice = "Your review working budget is spent. Call submit_review now with what you know; verdict validation and unread-part requirements still apply."
+const reviewBudgetNotice = "Your review working budget is spent. "
 
 // noToolReminderCap is the most reminders a review gives for prose-only turns.
 const noToolReminderCap = 3
 
-func budgetNotice(input []any) []any {
+func budgetNotice(input []any, notice string) []any {
+	out := make([]any, 0, len(input)+1)
 	for _, item := range input {
-		if m, ok := item.(map[string]any); ok && m["role"] == "user" && m["content"] == reviewBudgetNotice {
-			return input
+		m := asItem(item)
+		text, _ := m["content"].(string)
+		if m["role"] == "user" && strings.HasPrefix(text, reviewBudgetNotice) {
+			continue
 		}
+		out = append(out, item)
 	}
-	return append(input, map[string]any{"role": "user", "content": reviewBudgetNotice})
+	return append(out, map[string]any{"role": "user", "content": notice})
 }
 
 func (r *run) converse(ctx context.Context) (Verdict, error) {
@@ -736,17 +741,14 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 	}
 	for {
 		overBudget := r.sess.Requests >= 12
-		if overBudget {
-			r.sess.Input = budgetNotice(r.sess.Input)
-		}
 		r.sess.Requests++
 		if err := r.save(route.StageReview); err != nil {
 			return Verdict{}, err
 		}
 		force := ""
+		notice := ""
 		required := r.sess.Remind || overBudget
 		if required {
-			tool := SubmitReviewTool
 			var unread []string
 			if !r.external {
 				var err error
@@ -754,8 +756,10 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 					return Verdict{}, err
 				}
 			}
-			if !overBudget {
-				tool = reminderTool(unread)
+			tool := reminderTool(unread)
+			if overBudget {
+				notice = reviewBudgetNotice + reminderText(nil, unread)
+				r.sess.Input = budgetNotice(r.sess.Input, notice)
 			}
 			mode := "text_fallback"
 			if provider.SupportsToolChoice(ProviderRole(r.sess.Role)) {
@@ -783,7 +787,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 						return nil, err
 					}
 					if overBudget {
-						prepared = budgetNotice(prepared)
+						prepared = budgetNotice(prepared, notice)
 					}
 					return prepared, nil
 				},
@@ -793,7 +797,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		if err != nil && refusesCeiling(err) {
 			// The Env refused the whole conversation before sending: the reviewer resets its own
 			// working context once and sends the request again (reset.go).
-			event, progress, rerr := r.reset(err, force, overBudget)
+			event, progress, rerr := r.reset(err, &force, &notice)
 			if rerr != nil {
 				return Verdict{}, rerr
 			}
@@ -925,6 +929,17 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 					}
 				}
 				outs = append(outs, call.Output(result))
+			}
+		}
+		// Only reads already carried to this model response count as progress. The
+		// outputs below still get a turn to reach it before consuming an allowance.
+		if overBudget && !r.external && verdict == nil && problems == nil {
+			unread, err := r.unread(input)
+			if err != nil {
+				return Verdict{}, err
+			}
+			if len(unread) > 0 {
+				problems = []string{fmt.Sprintf("%d pinned part(s) unread; read them before a verdict; no reading progress", len(unread))}
 			}
 		}
 		input = slices.Concat(input, outs)

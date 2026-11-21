@@ -1,0 +1,112 @@
+package contract
+
+import (
+ "context"
+ "encoding/json"
+ "errors"
+ "fmt"
+ "os"
+ "path/filepath"
+ "strings"
+ "testing"
+
+ "github.com/KogenAI/kogen-coordinator/route"
+ "github.com/KogenAI/kogen-loop/provider"
+ "github.com/KogenAI/kogen-loop/sys"
+ "github.com/KogenAI/kogen-review/review"
+)
+
+type requiredBudgetEnv struct {
+ *fakeEnv
+ mode string
+ paths []string
+ delivered map[string]bool
+ rows []map[string]any
+ raw json.RawMessage
+ changed bool
+ reset bool
+ resumed bool
+ early bool
+ earlyRejected bool
+}
+
+func (h *requiredBudgetEnv) Unread(_ []any) ([]string,error) {
+ out := []string{}
+ for _, p := range h.paths { if !h.delivered[p] { out = append(out,p) } }
+ return out,nil
+}
+
+func (h *requiredBudgetEnv) Request(ctx context.Context, r review.Request) (*provider.Response, []any,error) {
+ raw,err := r.Retain(r.Input)
+ if err != nil { return nil,nil,err }; h.raw = raw
+ s,err := review.DecodeSession(raw); if err != nil { return nil,nil,err }
+ if s.Requests > 24 { return nil,nil,errors.New("fixture safety stop: non-reading was not bounded") }
+ if h.mode == "reset" && s.Requests == 14 && !h.changed {
+  h.changed=true; h.reset=true
+  return nil,nil,sys.Fail("candidate","context_budget_exceeded","scripted ceiling refusal; nothing sent",1)
+ }
+ if h.mode == "resume" && s.Requests == 15 && !h.changed {
+  h.changed=true; h.resumed=true
+  return nil,nil,errors.New("scripted interruption")
+ }
+ before,_ := h.Unread(r.Input)
+ prompt := ""
+ for _, item := range r.Input {
+  m,_ := item.(map[string]any)
+  if m["role"] == "user" { prompt,_ = m["content"].(string) }
+  if text,_ := m["output"].(string); strings.Contains(text,"invalid verdict:") && strings.Contains(text,"unread") { h.earlyRejected=true }
+ }
+ action := "ordinary"
+ lower := strings.ToLower(prompt)
+ if strings.Contains(lower,"call read_file on") { action="read" }
+ if strings.Contains(lower,"call submit_review") { action="submit" }
+ h.rows=append(h.rows,map[string]any{"n":s.Requests,"unread":len(before),"force":r.ForceTool,"prompt":action,"windows":len(s.Windows)})
+ // Only successful real read outputs actually carried on this request count as delivered.
+ calls:=map[any]string{}
+ for _, item := range r.Input {
+  m,_:=item.(map[string]any)
+  if m["type"]=="function_call" && m["name"]=="read_file" {
+   var args struct{Path string `json:"path"`}; a,_:=m["arguments"].(string); _=json.Unmarshal([]byte(a),&args); calls[m["call_id"]]=args.Path
+  }
+  if m["type"]=="function_call_output" {
+   text,_:=m["output"].(string)
+   for i,p:=range h.paths { if calls[m["call_id"]]==p && strings.Contains(text,fmt.Sprintf("required material %d",i)) { h.delivered[p]=true } }
+  }
+ }
+ read := func(p string) *provider.Response {
+  args,_:=json.Marshal(map[string]any{"path":p})
+  return answer(call(fmt.Sprintf("required-read-%d",s.Requests),"read_file",string(args)))
+ }
+ if s.Requests <= 12 { return read("app.txt"),r.Input,nil }
+ if h.mode=="stall" { return read("app.txt"),r.Input,nil }
+ if h.mode=="prose" { return prose("still considering"),r.Input,nil }
+ if h.mode=="early" && !h.early { h.early=true; return submitReview(approve),r.Input,nil }
+ // Do not issue the same required read twice: pending outputs are delivered on this request.
+ called:=map[string]bool{}
+ for _,row:=range h.paths { if h.delivered[row] { called[row]=true } }
+ // The previous pending read just reached the model; choose the next missing part.
+ for _,p:=range h.paths { if !called[p] { return read(p),r.Input,nil } }
+ if len(before)>0 { return answer(call(fmt.Sprintf("ack-%d",s.Requests),"list_files",`{"path":"."}`)),r.Input,nil }
+ return submitReview(approve),r.Input,nil
+}
+
+func TestRequiredReadBudgetFixture(t *testing.T) {
+ all:=map[string]any{}
+ for _,mode:=range []string{"forced","fallback","early","stall","prose","reset","resume"} {
+  in,base:=newReview(t)
+  if mode=="fallback" || mode=="prose" { in.Intent.Role.Provider="anthropic"; in.Intent.Role.Model="claude-sonnet-4-5" }
+  h:=&requiredBudgetEnv{fakeEnv:base,mode:mode,delivered:map[string]bool{}}
+  for i:=0;i<3;i++ { p:=filepath.Join(in.Run.Dir,fmt.Sprintf("required-%d.txt",i)); writeFile(t,p,fmt.Sprintf("required material %d\n",i)); h.paths=append(h.paths,p) }
+  res,err:=(review.Independent{}).Review(context.Background(),in,h)
+  if mode=="resume" && err!=nil && strings.Contains(err.Error(),"scripted interruption") {
+   pass:=greenPass(); in.Checkpoint=&review.Checkpoint{Stage:route.StageReview,Pass:&pass,Base:&pass,Session:h.raw}
+   res,err=(review.Independent{}).Resume(context.Background(),in,h)
+  }
+  reason,errorText:="",""
+  if res.Invalid!=nil { reason=res.Invalid.Reason }; if err!=nil { errorText=err.Error() }
+  unread,_:=h.Unread(nil)
+  all[mode]=map[string]any{"rows":h.rows,"verdict":res.Record.Verdict,"reason":reason,"error":errorText,"delivered":len(h.paths)-len(unread),"early_rejected":h.earlyRejected,"reset":h.reset,"resumed":h.resumed}
+ }
+ b,err:=json.Marshal(all); if err!=nil { t.Fatal(err) }
+ if err:=os.WriteFile(os.Getenv("REQUIRED_BUDGET_RESULT"),b,0600); err!=nil { t.Fatal(err) }
+}
