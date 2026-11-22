@@ -136,6 +136,21 @@ func TestDecodeSessionReadsWhatACheckpointKept(t *testing.T) {
 	if _, err := review.DecodeSession(nil); err == nil {
 		t.Error("session-decode: missing session state decoded without an error")
 	}
+	spaced, err := review.DecodeSession(json.RawMessage(sessionJSON + " \n\t\r\n"))
+	if err != nil {
+		t.Fatalf("session-decode: a session followed by whitespace: %v", err)
+	}
+	eq(t, "session-decode trailing whitespace requests", spaced.Requests, s.Requests)
+	for name, raw := range map[string]string{
+		"second object": sessionJSON + `{"attempts":1}`,
+		"spaced object": sessionJSON + "\n" + sessionJSON,
+		"text":          sessionJSON + " trailing",
+		"scalar":        sessionJSON + " 7",
+	} {
+		if _, err := review.DecodeSession(json.RawMessage(raw)); err == nil {
+			t.Errorf("session-decode: a session followed by %s decoded without an error", name)
+		}
+	}
 }
 
 // TestMaterialEvidenceJSON pins the keys of an external review's material evidence

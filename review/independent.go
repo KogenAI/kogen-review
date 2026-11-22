@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -205,6 +206,14 @@ func DecodeSession(raw json.RawMessage) (Session, error) {
 	dec.UseNumber()
 	if err := dec.Decode(&s); err != nil {
 		return s, err
+	}
+	// A checkpoint holds exactly one session value: only whitespace may follow it.
+	var rest json.RawMessage
+	if err := dec.Decode(&rest); err != io.EOF {
+		if err == nil {
+			err = errors.New("review session: unexpected data after the session value")
+		}
+		return Session{}, err
 	}
 	return s, nil
 }

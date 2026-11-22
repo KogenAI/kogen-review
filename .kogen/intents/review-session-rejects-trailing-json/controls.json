@@ -1,0 +1,54 @@
+{
+ "correct": {
+  "files": {
+   "review/independent.go": {
+    "patch": "--- a/review/independent.go\n+++ b/review/independent.go\n@@ -10,6 +10,7 @@\n \t\"encoding/json\"\n \t\"errors\"\n \t\"fmt\"\n+\t\"io\"\n \t\"maps\"\n \t\"os\"\n \t\"path/filepath\"\n@@ -206,6 +207,9 @@\n \tif err := dec.Decode(&s); err != nil {\n \t\treturn s, err\n \t}\n+\tif _, err := dec.Token(); !errors.Is(err, io.EOF) {\n+\t\treturn s, errors.New(\"review session has data after its JSON value\")\n+\t}\n \treturn s, nil\n }\n \n"
+   },
+   "contract/formats_test.go": {
+    "patch": "--- a/contract/formats_test.go\n+++ b/contract/formats_test.go\n@@ -136,6 +136,14 @@\n \tif _, err := review.DecodeSession(nil); err == nil {\n \t\tt.Error(\"session-decode: missing session state decoded without an error\")\n \t}\n+\tif _, err := review.DecodeSession(json.RawMessage(sessionJSON + \" \\n\\t\\r\")); err != nil {\n+\t\tt.Errorf(\"session-decode: trailing whitespace: %v\", err)\n+\t}\n+\tfor _, trailing := range []string{`{}`, ` {\"role\":{}}`, `x`} {\n+\t\tif _, err := review.DecodeSession(json.RawMessage(sessionJSON + trailing)); err == nil {\n+\t\t\tt.Errorf(\"session-decode: session followed by %q decoded without an error\", trailing)\n+\t\t}\n+\t}\n }\n \n // TestMaterialEvidenceJSON pins the keys of an external review's material evidence\n"
+   }
+  }
+ },
+ "wrong": [
+  {
+   "name": "decodes only the first value",
+   "scenario": "A valid session followed by more input is an error",
+   "step": "Then review-session-rejects-trailing-json: the sample \"valid session then a second JSON object\" is rejected with an error",
+   "files": {
+    "review/independent.go": {
+     "patch": "--- a/review/independent.go\n+++ b/review/independent.go\n@@ -10,7 +10,6 @@\n \t\"encoding/json\"\n \t\"errors\"\n \t\"fmt\"\n-\t\"io\"\n \t\"maps\"\n \t\"os\"\n \t\"path/filepath\"\n@@ -207,9 +206,6 @@\n \tif err := dec.Decode(&s); err != nil {\n \t\treturn s, err\n \t}\n-\tif _, err := dec.Token(); !errors.Is(err, io.EOF) {\n-\t\treturn s, errors.New(\"review session has data after its JSON value\")\n-\t}\n \treturn s, nil\n }\n \n"
+    }
+   }
+  },
+  {
+   "name": "rejects trailing whitespace",
+   "scenario": "A valid session followed by whitespace decodes",
+   "step": "Then review-session-rejects-trailing-json: the sample \"valid session then whitespace\" decodes without an error as model \"fixture-review-model\" with 13 requests",
+   "files": {
+    "review/independent.go": {
+     "patch": "--- a/review/independent.go\n+++ b/review/independent.go\n@@ -10,7 +10,6 @@\n \t\"encoding/json\"\n \t\"errors\"\n \t\"fmt\"\n-\t\"io\"\n \t\"maps\"\n \t\"os\"\n \t\"path/filepath\"\n@@ -207,7 +206,7 @@\n \tif err := dec.Decode(&s); err != nil {\n \t\treturn s, err\n \t}\n-\tif _, err := dec.Token(); !errors.Is(err, io.EOF) {\n+\tif int(dec.InputOffset()) != len(raw) {\n \t\treturn s, errors.New(\"review session has data after its JSON value\")\n \t}\n \treturn s, nil\n"
+    }
+   }
+  },
+  {
+   "name": "accepts empty input",
+   "scenario": "Malformed and empty input are still errors",
+   "step": "And review-session-rejects-trailing-json: the sample \"empty input\" is rejected with an error",
+   "files": {
+    "review/independent.go": {
+     "patch": "--- a/review/independent.go\n+++ b/review/independent.go\n@@ -202,6 +202,9 @@\n // DecodeSession reads a session a checkpoint kept.\n func DecodeSession(raw json.RawMessage) (Session, error) {\n \tvar s Session\n+\tif len(bytes.TrimSpace(raw)) == 0 {\n+\t\treturn s, nil\n+\t}\n \tdec := json.NewDecoder(bytes.NewReader(raw))\n \tdec.UseNumber()\n \tif err := dec.Decode(&s); err != nil {\n"
+    }
+   }
+  },
+  {
+   "name": "swallows decode errors",
+   "scenario": "Malformed and empty input are still errors",
+   "step": "Then review-session-rejects-trailing-json: the sample \"malformed session\" is rejected with an error",
+   "files": {
+    "review/independent.go": {
+     "patch": "--- a/review/independent.go\n+++ b/review/independent.go\n@@ -205,7 +205,7 @@\n \tdec := json.NewDecoder(bytes.NewReader(raw))\n \tdec.UseNumber()\n \tif err := dec.Decode(&s); err != nil {\n-\t\treturn s, err\n+\t\treturn s, nil\n \t}\n \tif _, err := dec.Token(); !errors.Is(err, io.EOF) {\n \t\treturn s, errors.New(\"review session has data after its JSON value\")\n"
+    }
+   }
+  }
+ ]
+}
