@@ -34,9 +34,23 @@ type roundTrip func(*http.Request) *http.Response
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r), nil }
 
+// callerModCache is the module cache of the caller's environment, read before TestMain gives the
+// process a HOME of its own (which would otherwise point the go command at an empty cache).
+var callerModCache = func() string {
+	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}()
+
 func coordinatorDir(t *testing.T) string {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/KogenAI/kogen-coordinator").Output()
+	list := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/KogenAI/kogen-coordinator")
+	if callerModCache != "" {
+		list.Env = append(os.Environ(), "GOMODCACHE="+callerModCache)
+	}
+	out, err := list.Output()
 	if err != nil || strings.TrimSpace(string(out)) == "" {
 		t.Fatalf("the pinned kogen-coordinator module is not available: %v", err)
 	}
