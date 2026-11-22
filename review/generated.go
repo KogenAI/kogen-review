@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,7 +173,40 @@ func runRegenerate(ctx context.Context, dir, command string) bool {
 	return cmd.Run() == nil
 }
 
-// extractTree writes the files of a tar archive of a tree into dir.
+// refuseSymlinkPath returns an error when a folder of name below dir is a symlink, or, with own,
+// when name itself is one: an entry there would be written through the symlink, possibly outside dir.
+func refuseSymlinkPath(dir, name, entry string, own bool) error {
+	rel, err := filepath.Rel(dir, name)
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if !own {
+		parts = parts[:len(parts)-1]
+	}
+	cur := dir
+	for _, part := range parts {
+		if part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("the archive of the reviewed tree writes %q through a symlink it made", entry)
+		}
+	}
+	return nil
+}
+
+// extractTree writes the files of a tar archive of a tree into dir. An entry whose parent folders
+// (or, for a folder or a regular file, whose own name) already exist in dir as a symlink is
+// refused, and nothing is written through the symlink.
 func extractTree(dir, archive string) error {
 	tr := tar.NewReader(strings.NewReader(archive))
 	for {
@@ -186,6 +220,9 @@ func extractTree(dir, archive string) error {
 		name := filepath.Join(dir, filepath.FromSlash(h.Name))
 		if rel, err := filepath.Rel(dir, name); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("the archive of the reviewed tree names %q outside its folder", h.Name)
+		}
+		if err := refuseSymlinkPath(dir, name, h.Name, h.Typeflag != tar.TypeSymlink); err != nil {
+			return err
 		}
 		switch h.Typeflag {
 		case tar.TypeDir:

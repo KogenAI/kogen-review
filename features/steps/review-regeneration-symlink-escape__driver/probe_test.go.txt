@@ -1,0 +1,102 @@
+package review
+
+import (
+	"archive/tar"
+	"bytes"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// probeEntry is one entry of a test archive: its header and, for a regular file, its content.
+type probeEntry struct {
+	header tar.Header
+	body   string
+}
+
+// probeTar is the archive of entries, written as git archive writes a tree.
+func probeTar(t *testing.T, entries ...probeEntry) string {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range entries {
+		h := e.header
+		h.Size = int64(len(e.body))
+		if err := tw.WriteHeader(&h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(e.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func TestAcceptanceProbeSymlinkEscape(t *testing.T) {
+	cases := map[string][]probeEntry{
+		"file beneath a symlinked parent": {
+			{header: tar.Header{Name: "link", Typeflag: tar.TypeSymlink}},
+			{header: tar.Header{Name: "link/escaped.txt", Typeflag: tar.TypeReg, Mode: 0o644}, body: "escaped\n"},
+		},
+		"folder beneath a symlinked parent": {
+			{header: tar.Header{Name: "link", Typeflag: tar.TypeSymlink}},
+			{header: tar.Header{Name: "link/sub/", Typeflag: tar.TypeDir, Mode: 0o755}},
+		},
+		"file named as an earlier symlink": {
+			{header: tar.Header{Name: "link", Typeflag: tar.TypeSymlink}},
+			{header: tar.Header{Name: "link", Typeflag: tar.TypeReg, Mode: 0o644}, body: "escaped\n"},
+		},
+	}
+	for name, entries := range cases {
+		t.Run(name, func(t *testing.T) {
+			outside := t.TempDir()
+			target := filepath.Join(outside, "target.txt")
+			if err := os.WriteFile(target, []byte("untouched\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			entries[0].header.Linkname = outside
+			if name == "file named as an earlier symlink" {
+				entries[0].header.Linkname = target
+			}
+			if err := extractTree(t.TempDir(), probeTar(t, entries...)); err == nil {
+				t.Fatal("extractTree returned no error for an entry written through a symlink")
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != "untouched\n" {
+				t.Errorf("the target outside the scratch folder is %q, %v, want it untouched", got, err)
+			}
+			left, err := os.ReadDir(outside)
+			if err != nil || len(left) != 1 {
+				t.Errorf("the folder outside the scratch folder holds %d entries, %v, want only target.txt", len(left), err)
+			}
+		})
+	}
+}
+
+func TestAcceptanceProbeOrdinaryEntries(t *testing.T) {
+	dir := t.TempDir()
+	archive := probeTar(t,
+		probeEntry{header: tar.Header{Name: "data/", Typeflag: tar.TypeDir, Mode: 0o755}},
+		probeEntry{header: tar.Header{Name: "data/rows.csv", Typeflag: tar.TypeReg, Mode: 0o644}, body: "a,b\n"},
+		probeEntry{header: tar.Header{Name: "bin/run.sh", Typeflag: tar.TypeReg, Mode: 0o755}, body: "#!/bin/sh\n"},
+		probeEntry{header: tar.Header{Name: "data/latest.csv", Typeflag: tar.TypeSymlink, Linkname: "rows.csv"}},
+	)
+	if err := extractTree(dir, archive); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "data", "rows.csv")); err != nil || string(got) != "a,b\n" {
+		t.Errorf("data/rows.csv is %q, %v", got, err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "bin", "run.sh")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("bin/run.sh is %v, %v, want mode 755", info, err)
+	}
+	if link, err := os.Readlink(filepath.Join(dir, "data", "latest.csv")); err != nil || link != "rows.csv" {
+		t.Errorf("data/latest.csv links to %q, %v, want rows.csv", link, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "data", "latest.csv")); err != nil || string(got) != "a,b\n" {
+		t.Errorf("reading through data/latest.csv gives %q, %v", got, err)
+	}
+}

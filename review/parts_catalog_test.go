@@ -1,6 +1,8 @@
 package review
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -477,5 +479,88 @@ func TestReviewInPartsNamesThePartWhoseMaterialWasNotDelivered(t *testing.T) {
 	want := fmt.Sprintf("the review material of part 2 of %d was not completely delivered in a completed round of the reviewer session; nothing was committed and custody is preserved", len(ev.ReviewParts))
 	if !ok || se.Reason != "context_custody_invalid" || se.Detail != want || len(x.briefs) != 2 {
 		t.Errorf("the review ended after %d sessions with %v, want %q", len(x.briefs), err, want)
+	}
+}
+
+// symlinkArchive is the tar archive of headers, each with its content in bodies by name.
+func symlinkArchive(t *testing.T, bodies map[string]string, headers ...tar.Header) string {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, h := range headers {
+		body := ""
+		if h.Typeflag == tar.TypeReg {
+			body = bodies[h.Name]
+		}
+		h.Size = int64(len(body))
+		if err := tw.WriteHeader(&h); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
+}
+
+func TestExtractTreeRefusesEntriesWrittenThroughASymlink(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry tar.Header
+		link  func(outside string) string
+	}{
+		{"file beneath a symlinked parent", tar.Header{Name: "link/escaped.txt", Typeflag: tar.TypeReg, Mode: 0o644}, func(o string) string { return o }},
+		{"folder beneath a symlinked parent", tar.Header{Name: "link/sub/", Typeflag: tar.TypeDir, Mode: 0o755}, func(o string) string { return o }},
+		{"file named as a symlink", tar.Header{Name: "link", Typeflag: tar.TypeReg, Mode: 0o644}, func(o string) string { return filepath.Join(o, "target.txt") }},
+		{"folder named as a symlink", tar.Header{Name: "link/", Typeflag: tar.TypeDir, Mode: 0o755}, func(o string) string { return o }},
+		{"symlink beneath a symlinked parent", tar.Header{Name: "link/inner", Typeflag: tar.TypeSymlink, Linkname: "x"}, func(o string) string { return o }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			outside := t.TempDir()
+			target := filepath.Join(outside, "target.txt")
+			if err := os.WriteFile(target, []byte("untouched\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			archive := symlinkArchive(t, map[string]string{c.entry.Name: "escaped\n"},
+				tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: c.link(outside)}, c.entry)
+			if err := extractTree(t.TempDir(), archive); err == nil {
+				t.Fatal("extractTree returned no error for an entry written through a symlink")
+			}
+			if got, err := os.ReadFile(target); err != nil || string(got) != "untouched\n" {
+				t.Errorf("the target outside the scratch folder is %q, %v, want it untouched", got, err)
+			}
+			if left, err := os.ReadDir(outside); err != nil || len(left) != 1 {
+				t.Errorf("the folder outside the scratch folder holds %d entries, %v, want only target.txt", len(left), err)
+			}
+		})
+	}
+}
+
+func TestExtractTreeWritesOrdinaryEntriesAndSafeSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	archive := symlinkArchive(t, map[string]string{"data/rows.csv": "a,b\n", "bin/run.sh": "#!/bin/sh\n"},
+		tar.Header{Name: "data/", Typeflag: tar.TypeDir, Mode: 0o755},
+		tar.Header{Name: "data/rows.csv", Typeflag: tar.TypeReg, Mode: 0o644},
+		tar.Header{Name: "bin/run.sh", Typeflag: tar.TypeReg, Mode: 0o755},
+		tar.Header{Name: "data/latest.csv", Typeflag: tar.TypeSymlink, Linkname: "rows.csv"},
+	)
+	if err := extractTree(dir, archive); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "data", "rows.csv")); err != nil || string(got) != "a,b\n" {
+		t.Errorf("data/rows.csv is %q, %v", got, err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "bin", "run.sh")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Errorf("bin/run.sh is %v, %v, want mode 755", info, err)
+	}
+	if link, err := os.Readlink(filepath.Join(dir, "data", "latest.csv")); err != nil || link != "rows.csv" {
+		t.Errorf("data/latest.csv links to %q, %v, want rows.csv", link, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "data", "latest.csv")); err != nil || string(got) != "a,b\n" {
+		t.Errorf("reading through data/latest.csv gives %q, %v", got, err)
 	}
 }
