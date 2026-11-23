@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/KogenAI/kogen-executor/core"
@@ -97,5 +98,101 @@ func TestReportVerificationErrorRetainsSubmittedEvidence(t *testing.T) {
 	out, code := report(review.Result{Record: core.ReviewRecord{Verdict: "approve", Tree: "edited", Findings: findings}, Repairs: 2}, e)
 	if code == 0 || out.Verdict != "error" || out.Error.Class != "review" || out.Error.Reason != "repair_unverified" || out.Error.Detail != "not verified" || len(out.Error.Lines) != 1 || out.Error.Lines[0] != "original line" || out.Tree != "edited" || out.Submitted == nil || out.Submitted.Verdict != "approve" || len(out.Findings) != 1 || out.Repairs != 2 {
 		t.Fatalf("report: %+v code %d", out, code)
+	}
+}
+
+func TestUsageErrors(t *testing.T) {
+	// The root does not exist: a run that wrongly got past the usage check would refuse with
+	// another message instead of starting any review work.
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no arguments", nil},
+		{"missing -start", []string{"-root", missing, "-slug", "tiny", "-model", "test"}},
+		{"missing -slug", []string{"-root", missing, "-start", "HEAD", "-model", "test"}},
+		{"missing -model", []string{"-root", missing, "-start", "HEAD", "-slug", "tiny"}},
+		{"positional argument", []string{"-root", missing, "-start", "HEAD", "-slug", "tiny", "-model", "test", "extra"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, stderr bytes.Buffer
+			if code := run(tc.args, &out, &stderr); code != 2 {
+				t.Fatalf("exit %d, want 2; stderr %q", code, stderr.String())
+			}
+			if out.Len() != 0 {
+				t.Fatalf("stdout %q, want empty", out.String())
+			}
+			if !strings.HasPrefix(stderr.String(), "usage: kogen-review -start REV ") || strings.Count(stderr.String(), "\n") != 1 {
+				t.Fatalf("stderr %q, want the usage line alone", stderr.String())
+			}
+		})
+	}
+}
+
+func TestUnusableInputsAreRefused(t *testing.T) {
+	const intent = "# Tiny\n\nSlug: tiny\nModel: not applicable — simple\nAcceptance:\n- .kogen/intents/tiny/acceptance.feature\n"
+	for _, tc := range []struct {
+		name    string
+		files   map[string]string
+		start   string
+		message string
+	}{
+		{"no intent", map[string]string{"README.md": "x\n"}, "HEAD", "intent.md"},
+		{"no acceptance feature", map[string]string{".kogen/intents/tiny/intent.md": intent}, "HEAD", "acceptance.feature"},
+		{"invalid project.yaml", map[string]string{
+			".kogen/intents/tiny/intent.md":          intent,
+			".kogen/intents/tiny/acceptance.feature": "Feature: Tiny\n",
+			".kogen/project.yaml":                    "version: seven\n",
+		}, "HEAD", "project.yaml"},
+		{"start is not a commit", map[string]string{
+			".kogen/intents/tiny/intent.md":          intent,
+			".kogen/intents/tiny/acceptance.feature": "Feature: Tiny\n",
+		}, "no-such-revision", "-start no-such-revision is not a commit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tmp := t.TempDir()
+			git := func(args ...string) {
+				t.Helper()
+				c := exec.Command("git", args...)
+				c.Dir = root
+				if b, e := c.CombinedOutput(); e != nil {
+					t.Fatalf("git: %v %s", e, b)
+				}
+			}
+			git("init", "-q")
+			for name, text := range tc.files {
+				p := filepath.Join(root, name)
+				if e := os.MkdirAll(filepath.Dir(p), 0755); e != nil {
+					t.Fatal(e)
+				}
+				if e := os.WriteFile(p, []byte(text), 0644); e != nil {
+					t.Fatal(e)
+				}
+			}
+			git("add", "-A")
+			git("commit", "-qm", "start")
+			// A review would make its run folder in the temporary directory.
+			t.Setenv("TMPDIR", tmp)
+			var out, stderr bytes.Buffer
+			code := run([]string{"-root", root, "-start", tc.start, "-slug", "tiny", "-model", "test"}, &out, &stderr)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2; stdout %q stderr %q", code, out.String(), stderr.String())
+			}
+			if out.Len() != 0 {
+				t.Fatalf("stdout %q, want empty", out.String())
+			}
+			line := stderr.String()
+			if !strings.HasPrefix(line, "kogen-review: ") || strings.Count(line, "\n") != 1 || !strings.HasSuffix(line, "\n") || strings.Contains(line, "usage:") {
+				t.Fatalf("stderr %q, want one kogen-review: refusal", line)
+			}
+			if !strings.Contains(line, tc.message) {
+				t.Fatalf("stderr %q does not name the case (%q)", line, tc.message)
+			}
+			if left, e := os.ReadDir(tmp); e != nil || len(left) != 0 {
+				t.Fatalf("a refusal left %v in the temporary directory (%v)", left, e)
+			}
+		})
 	}
 }
