@@ -6,12 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
 	"github.com/KogenAI/kogen-loop/sys"
 	"github.com/KogenAI/kogen-review/review"
+	"github.com/KogenAI/kogen-verification/verify"
 )
 
 func TestInitialVerificationStops(t *testing.T) {
@@ -194,5 +197,96 @@ func TestUnusableInputsAreRefused(t *testing.T) {
 				t.Fatalf("a refusal left %v in the temporary directory (%v)", left, e)
 			}
 		})
+	}
+}
+
+func partialEvents(events ...map[string]any) *verificationLog {
+	l := &verificationLog{}
+	for _, e := range events {
+		l.Log(e)
+	}
+	return l
+}
+
+func TestPartialKeepsCompletedResultsOnTheirOwnCommands(t *testing.T) {
+	cfg := &project.Config{
+		Setup:  []string{"setup one", "setup two"},
+		Checks: []project.Check{{Name: "format", Run: "fmt run"}, {Name: "compile", Run: "build run"}},
+	}
+	intent := &project.Intent{Model: &project.ModelSpec{None: true}}
+	// Commands start together and finish in another order, so each result must find its own command.
+	l := partialEvents(
+		map[string]any{"event": "command", "name": "setup-1", "command": "setup one"},
+		map[string]any{"event": "command", "name": "setup-2", "command": "setup two"},
+		map[string]any{"event": "command", "name": "acceptance", "command": "accept run"},
+		map[string]any{"event": "command", "name": "format", "command": "fmt run"},
+		map[string]any{"event": "command", "name": "compile", "command": "build run"},
+		map[string]any{"event": "command_result", "name": "compile", "status": 3, "output": "compile output\n"},
+		map[string]any{"event": "command_result", "name": "setup-2", "status": 0, "output": "second setup output"},
+		map[string]any{"event": "command_result", "name": "acceptance", "status": 0, "output": "accepted"},
+		map[string]any{"event": "command_result", "name": "format", "status": 2, "output": "format output"},
+		map[string]any{"event": "command_result", "name": "setup-1", "status": 5, "output": "first setup output"},
+	)
+	want := verify.Pass{
+		N: 1, Tree: "tree-1", Model: verify.ModelNone,
+		Setup: []verify.CommandResult{
+			{Name: "setup-1", Command: "setup one", Status: 5, Output: "first setup output"},
+			{Name: "setup-2", Command: "setup two", Status: 0, Output: "second setup output"},
+		},
+		Checks: []verify.CommandResult{
+			{Name: "format", Command: "fmt run", Status: 2, Output: "format output"},
+			{Name: "compile", Command: "build run", Status: 3, Output: "compile output\n"},
+		},
+		NotRun: []string{},
+	}
+	if got := l.partial("tree-1", cfg, intent); !reflect.DeepEqual(got, want) {
+		t.Fatalf("partial:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestPartialListsMissingWorkInOrder(t *testing.T) {
+	cfg := &project.Config{
+		Setup:  []string{"setup one", "setup two"},
+		Checks: []project.Check{{Name: "format", Run: "fmt run"}, {Name: "compile", Run: "build run"}},
+	}
+	// Only the first setup command and the second check completed; a command that started but never
+	// reported a result is still missing.
+	events := []map[string]any{
+		{"event": "command", "name": "setup-1", "command": "setup one"},
+		{"event": "command_result", "name": "setup-1", "status": 0, "output": "ok"},
+		{"event": "command", "name": "setup-2", "command": "setup two"},
+		{"event": "command", "name": "compile", "command": "build run"},
+		{"event": "command_result", "name": "compile", "status": 1, "output": "broken"},
+	}
+	for _, tc := range []struct {
+		name   string
+		intent *project.Intent
+		model  verify.ModelResult
+		notRun []string
+	}{
+		{"no model required", &project.Intent{Model: &project.ModelSpec{None: true}}, verify.ModelNone, []string{"setup-2", "acceptance", "format"}},
+		{"model required", &project.Intent{Model: &project.ModelSpec{Path: "model.qnt"}}, verify.ModelNotRun, []string{"setup-2", "acceptance", "model", "format"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := verify.Pass{
+				N: 1, Tree: "tree-2", Model: tc.model,
+				Setup:  []verify.CommandResult{{Name: "setup-1", Command: "setup one", Status: 0, Output: "ok"}},
+				Checks: []verify.CommandResult{{Name: "compile", Command: "build run", Status: 1, Output: "broken"}},
+				NotRun: tc.notRun,
+			}
+			if got := partialEvents(events...).partial("tree-2", cfg, tc.intent); !reflect.DeepEqual(got, want) {
+				t.Fatalf("partial:\n got %+v\nwant %+v", got, want)
+			}
+		})
+	}
+	// Nothing completed: every item is listed, in order.
+	none := (&verificationLog{}).partial("tree-3", cfg, &project.Intent{Model: &project.ModelSpec{Path: "model.qnt"}})
+	want := verify.Pass{
+		N: 1, Tree: "tree-3", Model: verify.ModelNotRun,
+		Setup: []verify.CommandResult{}, Checks: []verify.CommandResult{},
+		NotRun: []string{"setup-1", "setup-2", "acceptance", "model", "format", "compile"},
+	}
+	if !reflect.DeepEqual(none, want) {
+		t.Fatalf("partial with no events:\n got %+v\nwant %+v", none, want)
 	}
 }
