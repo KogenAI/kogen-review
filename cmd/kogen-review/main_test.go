@@ -3,12 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/KogenAI/kogen-coordinator/project"
 	"github.com/KogenAI/kogen-executor/core"
@@ -288,5 +293,131 @@ func TestPartialListsMissingWorkInOrder(t *testing.T) {
 	}
 	if !reflect.DeepEqual(none, want) {
 		t.Fatalf("partial with no events:\n got %+v\nwant %+v", none, want)
+	}
+}
+
+// capturedRequest is the first request a fake provider received.
+type capturedRequest struct {
+	path string
+	body map[string]any
+}
+
+// reviewWithFakeProvider runs the command on a temporary Git checkout whose initial verification
+// passes, against a loopback server that records the first provider request and refuses it. The
+// flags are given the server's URL as the base URL of an openai-compatible provider. It returns
+// the recorded request.
+func reviewWithFakeProvider(t *testing.T, flags func(baseURL string) []string, seam bool) capturedRequest {
+	t.Helper()
+	var mu sync.Mutex
+	var first *capturedRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		body := map[string]any{}
+		_ = json.Unmarshal(b, &body)
+		mu.Lock()
+		if first == nil {
+			first = &capturedRequest{path: r.URL.Path, body: body}
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"error":{"code":"refused_by_fake","type":"invalid_request_error","message":"refused by the fake provider"}}`)
+	}))
+	defer srv.Close()
+
+	// A saved login for the default provider, in a home of its own, and the loopback seam that
+	// sends its requests to the fake provider.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	creds := filepath.Join(home, ".kogen", "credentials")
+	if err := os.MkdirAll(creds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	login, _ := json.Marshal(map[string]any{
+		"access_token": "fake-access", "refresh_token": "fake-refresh", "client_id": "oaiapp_fakeclient",
+		"expires_at": time.Now().Add(24 * time.Hour).Unix(),
+	})
+	if err := os.WriteFile(filepath.Join(creds, "chatgpt.json"), login, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if seam {
+		t.Setenv("KOGEN_PROVIDER_URL", srv.URL)
+	}
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+
+	root := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = root
+		b, e := c.CombinedOutput()
+		if e != nil {
+			t.Fatalf("git: %v %s", e, b)
+		}
+		return string(bytes.TrimSpace(b))
+	}
+	write := func(name, text string) {
+		t.Helper()
+		p := filepath.Join(root, name)
+		if e := os.MkdirAll(filepath.Dir(p), 0o755); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.WriteFile(p, []byte(text), 0o644); e != nil {
+			t.Fatal(e)
+		}
+	}
+	git("init", "-q")
+	git("config", "user.email", "test@example.invalid")
+	git("config", "user.name", "Test")
+	write(".kogen/intents/tiny/intent.md", "# Tiny\n\nSlug: tiny\nModel: not applicable — simple\nAcceptance:\n- .kogen/intents/tiny/acceptance.feature\n")
+	write(".kogen/intents/tiny/acceptance.feature", "Feature: Tiny\n")
+	write(".kogen/project.yaml", "version: 1\ncommands:\n  setup: []\n  fix: []\n  checks:\n    - name: ok\n      run: 'true'\n  acceptance:\n    run: 'echo {} > \"$KOGEN_ACCEPTANCE_REPORT\"'\n    steps_dir: features/steps\n")
+	git("add", "-A")
+	git("commit", "-qm", "start")
+	start := git("rev-parse", "HEAD")
+
+	args := append([]string{"-root", root, "-start", start, "-slug", "tiny"}, flags(srv.URL+"/v1")...)
+	var out, stderr bytes.Buffer
+	run(args, &out, &stderr)
+	var res result
+	if e := json.Unmarshal(out.Bytes(), &res); e != nil {
+		t.Fatalf("%v: stdout %q stderr %q", e, out.String(), stderr.String())
+	}
+	defer os.RemoveAll(res.Run)
+	mu.Lock()
+	defer mu.Unlock()
+	if first == nil {
+		t.Fatalf("the fake provider received no request; stdout %q stderr %q", out.String(), stderr.String())
+	}
+	return *first
+}
+
+func TestSuppliedRoleFlagsReachTheProviderRequest(t *testing.T) {
+	got := reviewWithFakeProvider(t, func(baseURL string) []string {
+		return []string{"-provider", "openai-compatible", "-model", "supplied-model", "-effort", "high", "-base-url", baseURL}
+	}, false)
+	if got.path != "/v1/chat/completions" {
+		t.Errorf("route %q, want /v1/chat/completions under the supplied base URL", got.path)
+	}
+	if got.body["model"] != "supplied-model" {
+		t.Errorf("model %v, want supplied-model", got.body["model"])
+	}
+	if got.body["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort %v, want high", got.body["reasoning_effort"])
+	}
+}
+
+func TestOmittedRoleFlagsUseTheDocumentedDefaults(t *testing.T) {
+	got := reviewWithFakeProvider(t, func(string) []string { return []string{"-model", "supplied-model"} }, true)
+	if !strings.HasSuffix(got.path, "/responses") {
+		t.Errorf("route %q, want the chatgpt Responses route (ending /responses)", got.path)
+	}
+	if got.body["model"] != "supplied-model" {
+		t.Errorf("model %v, want supplied-model", got.body["model"])
+	}
+	reasoning, _ := got.body["reasoning"].(map[string]any)
+	if reasoning["effort"] != "medium" {
+		t.Errorf("reasoning.effort %v, want medium", got.body["reasoning"])
 	}
 }
