@@ -1,6 +1,7 @@
 package review
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -325,11 +326,15 @@ func sharedTestSupportLine(repo *git.Repo, start, tree string, catalog []map[str
 		}
 		support := isSharedTestSupportPath(path)
 		if !support && manifestNames[pathBase(path)] {
-			d, err := repo.OK("diff", "-U0", "--no-color", "--no-ext-diff", "--no-textconv", start, tree, "--", ":(literal)"+path)
+			before, err := repo.OK("show", start+":"+path)
 			if err != nil {
 				return "", err
 			}
-			support = !plainVersionBump(d)
+			after, err := repo.OK("show", tree+":"+path)
+			if err != nil {
+				return "", err
+			}
+			support = !plainVersionBump(pathBase(path), before, after)
 		}
 		if support {
 			paths = append(paths, path)
@@ -342,11 +347,21 @@ func sharedTestSupportLine(repo *git.Repo, start, tree string, catalog []map[str
 }
 
 var (
-	sharedBaseNames  = map[string]bool{"test_helper.rb": true, "spec_helper.rb": true, "rails_helper.rb": true, "conftest.py": true, "setup_tests.js": true, "setup-tests.ts": true}
-	supportDirNames  = map[string]bool{"test_helpers": true, "test_support": true, "spec_support": true, "support": true}
-	testRootDirNames = map[string]bool{"test": true, "tests": true, "spec": true, "features": true}
-	manifestNames    = map[string]bool{"Gemfile": true, "Gemfile.lock": true, "package.json": true, "package-lock.json": true, "go.mod": true, "go.sum": true, "mix.exs": true, "mix.lock": true, "pyproject.toml": true, "requirements.txt": true}
-	versionRunRe     = regexp.MustCompile(`[0-9][0-9A-Za-z.+_-]*`)
+	sharedBaseNames      = map[string]bool{"test_helper.rb": true, "spec_helper.rb": true, "rails_helper.rb": true, "conftest.py": true, "setup_tests.js": true, "setup-tests.ts": true}
+	supportDirNames      = map[string]bool{"test_helpers": true, "test_support": true, "spec_support": true, "support": true}
+	testRootDirNames     = map[string]bool{"test": true, "tests": true, "spec": true, "features": true}
+	manifestNames        = map[string]bool{"Gemfile": true, "Gemfile.lock": true, "package.json": true, "package-lock.json": true, "go.mod": true, "go.sum": true, "mix.exs": true, "mix.lock": true, "pyproject.toml": true, "requirements.txt": true}
+	versionAtomRe        = regexp.MustCompile(`[vV]?[0-9]+(?:\.(?:[0-9]+|[xX*]))*(?:[+-][0-9A-Za-z.-]+)*`)
+	versionSpecRe        = regexp.MustCompile(`^(?:[~^<>=|* \t]*[vV]?[0-9]+(?:\.(?:[0-9]+|[xX*]))*(?:[+-][0-9A-Za-z.-]+)*)+(?:[ \t|*]*)$`)
+	manifestVersionLines = map[string]*regexp.Regexp{
+		"go.mod":           regexp.MustCompile(`^(\s*(?:require\s+)?[A-Za-z0-9._~/-]+\s+)(v[0-9][0-9A-Za-z.+_-]*)(\s*(?://.*)?)$`),
+		"mix.lock":         regexp.MustCompile(`^(\s*"[^"]+":\s*\{:hex,\s*:[^,]+,\s*")([0-9][0-9A-Za-z.+_-]*)(".*)$`),
+		"pyproject.toml":   regexp.MustCompile(`^(\s*version\s*=\s*['"])([0-9][0-9A-Za-z.+_-]*)(['"]\s*(?:#.*)?)$`),
+		"go.sum":           regexp.MustCompile(`^(\S+\s+)(v[0-9][0-9A-Za-z.+_-]*)(/go\.mod\s+\S+|\s+\S+)$`),
+		"requirements.txt": regexp.MustCompile(`^(\s*[A-Za-z0-9_.-]+\s*(?:==|>=|<=|~=|>|<)\s*)([0-9][0-9A-Za-z.+_-]*)(\s*(?:#.*)?)$`),
+		"Gemfile":          regexp.MustCompile(`^(\s*gem\s+['"][^'"]+['"]\s*,\s*['"][~><= ]*)([0-9][0-9A-Za-z.+_-]*)(['"].*)$`),
+	}
+	lockVersionRe = regexp.MustCompile(`^(\s+[A-Za-z0-9_.-]+ \()([0-9][0-9A-Za-z.+_-]*)(\).*)$`)
 )
 
 func pathBase(path string) string { return path[strings.LastIndex(path, "/")+1:] }
@@ -371,23 +386,134 @@ func isSharedTestSupportPath(path string) bool {
 	return false
 }
 
-// plainVersionBump reports whether the removed and added lines of a -U0 diff pair up in order
-// and are equal once every version-like run is replaced by 0.
-func plainVersionBump(diff string) bool {
-	var removed, added []string
-	inHunk := false
-	for _, line := range strings.Split(diff, "\n") {
-		switch {
-		case strings.HasPrefix(line, "@@"):
-			inHunk = true
-		case !inHunk:
-		case strings.HasPrefix(line, "-"):
-			removed = append(removed, versionRunRe.ReplaceAllString(line[1:], "0"))
-		case strings.HasPrefix(line, "+"):
-			added = append(added, versionRunRe.ReplaceAllString(line[1:], "0"))
+// plainVersionBump retains all bytes except values identified as versions in their syntax.
+func plainVersionBump(name, before, after string) bool {
+	normalize := func(text string) string {
+		switch name {
+		case "package.json", "package-lock.json":
+			return normalizePackageVersions(name, text)
+		case "Gemfile.lock":
+			lines := strings.Split(text, "\n")
+			section := false
+			for i, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "specs:" {
+					section = true
+				} else if line == strings.TrimLeft(line, " \t") && trimmed != "" {
+					section = false
+				}
+				if section {
+					lines[i] = maskTextVersion(lockVersionRe, line)
+				}
+			}
+			return strings.Join(lines, "\n")
+		}
+		if re := manifestVersionLines[name]; re != nil {
+			lines := strings.Split(text, "\n")
+			inRequire := false
+			section := ""
+			for i, line := range lines {
+				if name == "pyproject.toml" {
+					trimmed := strings.TrimSpace(line)
+					if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+						section = trimmed
+					}
+					if section != "[project]" && section != "[tool.poetry]" {
+						continue
+					}
+				}
+				if name == "go.mod" {
+					fields := strings.Fields(line)
+					if len(fields) == 2 && fields[0] == "require" && fields[1] == "(" {
+						inRequire = true
+						continue
+					}
+					if len(fields) > 0 && fields[0] == ")" {
+						inRequire = false
+					}
+					if !inRequire && (len(fields) == 0 || fields[0] != "require") {
+						continue
+					}
+				}
+				lines[i] = maskTextVersion(re, line)
+			}
+			return strings.Join(lines, "\n")
+		}
+		return text
+	}
+	return normalize(before) == normalize(after)
+}
+
+func maskTextVersion(re *regexp.Regexp, line string) string {
+	m := re.FindStringSubmatchIndex(line)
+	if m == nil || !versionSpecRe.MatchString(line[m[4]:m[5]]) {
+		return line
+	}
+	return line[:m[4]] + "VERSION" + line[m[5]:]
+}
+
+func normalizePackageVersions(name, text string) string {
+	if !json.Valid([]byte(text)) {
+		return text
+	}
+	dec := json.NewDecoder(strings.NewReader(text))
+	type span struct{ start, end int }
+	var spans []span
+	var value func([]string)
+	value = func(path []string) {
+		start := int(dec.InputOffset())
+		tok, err := dec.Token()
+		if err != nil {
+			return
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			switch v {
+			case '{':
+				for dec.More() {
+					key, err := dec.Token()
+					if err != nil {
+						return
+					}
+					value(append(path, key.(string)))
+				}
+				_, _ = dec.Token()
+			case '[':
+				for dec.More() {
+					value(append(path, "[]"))
+				}
+				_, _ = dec.Token()
+			}
+		case string:
+			eligible := len(path) == 1 && path[0] == "version"
+			if name == "package-lock.json" && len(path) == 3 && path[0] == "packages" && path[2] == "version" {
+				eligible = true
+			}
+			if name == "package-lock.json" && len(path) == 3 && path[0] == "dependencies" && path[2] == "version" {
+				eligible = true
+			}
+			if name == "package.json" && len(path) == 2 {
+				switch path[0] {
+				case "dependencies", "devDependencies", "peerDependencies", "optionalDependencies":
+					eligible = true
+				}
+			}
+			if eligible && versionSpecRe.MatchString(v) && strings.ContainsAny(v, "0123456789") {
+				end := int(dec.InputOffset())
+				pos := strings.IndexByte(text[start:end], '"')
+				if pos >= 0 && text[start+pos:end] == `"`+v+`"` {
+					spans = append(spans, span{start + pos, end})
+				}
+			}
 		}
 	}
-	return slices.Equal(removed, added)
+	value(nil)
+	for i := len(spans) - 1; i >= 0; i-- {
+		p := spans[i]
+		literal := text[p.start:p.end]
+		text = text[:p.start] + versionAtomRe.ReplaceAllString(literal, "VERSION") + text[p.end:]
+	}
+	return text
 }
 
 func renameDiff(repo *git.Repo, start, tree, origin, dest string) (string, error) {
