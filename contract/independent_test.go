@@ -922,3 +922,56 @@ func TestIndependentReviewAppliesTheStudioRuleSnapshot(t *testing.T) {
 		t.Fatalf("no snapshot: %s", third)
 	}
 }
+
+// Non-text repairs must retain their changed-file count without inventing changed lines.
+func TestIndependentReviewAccountsForBinaryAndModeOnlyRepairs(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"binary", "mode-only"} {
+		t.Run(kind, func(t *testing.T) {
+			in, h := newReview(t)
+			root := in.Candidate.Root
+			path := filepath.Join(root, "app.txt")
+			git(t, root, nil, "config", "core.filemode", "true")
+			if kind == "binary" {
+				writeFile(t, path, "before\x00binary\n")
+			}
+			first, err := in.Candidate.Repo.Tree(in.Candidate.Start, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in.Candidate.Tree = first
+			in.Evidence.Pass.Tree = first
+			if kind == "binary" {
+				writeFile(t, path, "after\x00binary\n")
+			} else {
+				if err := os.Chmod(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			final, err := in.Candidate.Repo.Tree(in.Candidate.Start, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first == final {
+				t.Fatal("repair did not change the tree")
+			}
+			h.answers = []*provider.Response{submitReview(`{"verdict":"approve","findings":[]}`), submitReview(`{"verdict":"approve","findings":[]}`)}
+			h.verifies = []verify.Pass{{N: 2, Clean: true, Green: true, Tree: final}}
+			res, err := review.Independent{}.Review(context.Background(), in, h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Account == nil {
+				t.Fatal("repair has no Account")
+			}
+			eq(t, "non-text repair rounds", res.Account.RepairRounds, 1)
+			effect := res.Account.Effect
+			eq(t, "non-text first tree", effect.FirstTree, first)
+			eq(t, "non-text final tree", effect.FinalTree, final)
+			if effect.FilesChanged == nil || effect.LinesAdded == nil || effect.LinesDeleted == nil {
+				t.Fatalf("unknown repair totals: %+v", effect)
+			}
+			deepEq(t, "non-text repair totals", []int{*effect.FilesChanged, *effect.LinesAdded, *effect.LinesDeleted}, []int{1, 0, 0})
+		})
+	}
+}

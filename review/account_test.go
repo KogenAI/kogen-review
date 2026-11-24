@@ -1,9 +1,14 @@
 package review
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	gitpkg "github.com/KogenAI/kogen-coordinator/git"
 	"github.com/KogenAI/kogen-executor/core"
+	"github.com/KogenAI/kogen-verification/verify"
 )
 
 func deref[T any](p *T) any {
@@ -50,5 +55,55 @@ func TestAttemptOfSumsAndDividesTheFigures(t *testing.T) {
 		if have != c.share {
 			t.Errorf("%s: share %v, want %v", c.name, have, c.share)
 		}
+	}
+}
+
+// Binary content and executable-bit repairs change a file without changing line totals.
+func TestEffectOfBinaryAndModeOnlyRepairs(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"binary", "mode-only"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			repo := gitpkg.New(root, nil)
+			run := func(args ...string) string {
+				t.Helper()
+				out, err := repo.OK(args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return strings.TrimSpace(out)
+			}
+			run("init", "-q")
+			run("config", "core.filemode", "true")
+			path := filepath.Join(root, "file")
+			content := "unchanged text\n"
+			if kind == "binary" {
+				content = "before\x00binary\n"
+			}
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			run("add", "file")
+			first := run("write-tree")
+			if kind == "binary" {
+				if err := os.WriteFile(path, []byte("after\x00binary\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Chmod(path, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			run("add", "file")
+			final := run("write-tree")
+			if first == final {
+				t.Fatal("repair did not change the tree")
+			}
+			effect := effectOf(Candidate{Root: root, Repo: repo}, first, Result{Pass: verify.Pass{Tree: final}}, nil, nil)
+			got := [3]any{deref(effect.FilesChanged), deref(effect.LinesAdded), deref(effect.LinesDeleted)}
+			if got != [3]any{1, 0, 0} {
+				t.Fatalf("repair totals = %v, want [1 0 0]", got)
+			}
+		})
 	}
 }
