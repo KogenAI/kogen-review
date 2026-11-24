@@ -1,0 +1,51 @@
+{
+  "correct": {
+    "files": {
+      "review/generated.go": {
+        "patch": "--- a/review/generated.go\n+++ b/review/generated.go\n@@ -161,14 +161,14 @@\n \treturn nil\n }\n \n-// runRegenerate runs command with sh in dir, with no input and this process's environment, and\n-// reports whether it ran and exited 0 within regenerateLimit.\n+// runRegenerate runs command with sh in dir, with no input and only PATH passed from the\n+// review process. It reports whether the command ran and exited 0 within regenerateLimit.\n func runRegenerate(ctx context.Context, dir, command string) bool {\n \tctx, cancel := context.WithTimeout(ctx, regenerateLimit)\n \tdefer cancel()\n \tcmd := exec.CommandContext(ctx, \"sh\", \"-c\", command)\n \tcmd.Dir = dir\n-\tcmd.Env = os.Environ()\n+\tcmd.Env = []string{\"PATH=\" + os.Getenv(\"PATH\")}\n \tcmd.WaitDelay = 5 * time.Second\n \treturn cmd.Run() == nil\n }\n"
+      }
+    }
+  },
+  "wrong": [
+    {
+      "name": "inherit the full parent environment",
+      "scenario": "Regeneration isolates parent variables and preserves review outcomes",
+      "step": "Then generated-command-environment-isolation: a generator checking for a parent-only sentinel is \"summarised\", a generator using an executable only on the parent's PATH is \"summarised\", and a generator that writes matching bytes but exits unsuccessfully is \"kept\"",
+      "files": {
+        "review/generated.go": {
+          "patch": "--- a/review/generated.go\n+++ b/review/generated.go\n@@ -168,7 +168,7 @@\n \tdefer cancel()\n \tcmd := exec.CommandContext(ctx, \"sh\", \"-c\", command)\n \tcmd.Dir = dir\n-\tcmd.Env = []string{\"PATH=\" + os.Getenv(\"PATH\")}\n+\tcmd.Env = os.Environ()\n \tcmd.WaitDelay = 5 * time.Second\n \treturn cmd.Run() == nil\n }\n"
+        }
+      }
+    },
+    {
+      "name": "remove PATH from the environment",
+      "scenario": "Regeneration isolates parent variables and preserves review outcomes",
+      "step": "Then generated-command-environment-isolation: a generator checking for a parent-only sentinel is \"summarised\", a generator using an executable only on the parent's PATH is \"summarised\", and a generator that writes matching bytes but exits unsuccessfully is \"kept\"",
+      "files": {
+        "review/generated.go": {
+          "patch": "--- a/review/generated.go\n+++ b/review/generated.go\n@@ -168,7 +168,7 @@\n \tdefer cancel()\n \tcmd := exec.CommandContext(ctx, \"sh\", \"-c\", command)\n \tcmd.Dir = dir\n-\tcmd.Env = []string{\"PATH=\" + os.Getenv(\"PATH\")}\n+\tcmd.Env = []string{\"PATH=\"}\n \tcmd.WaitDelay = 5 * time.Second\n \treturn cmd.Run() == nil\n }\n"
+        }
+      }
+    },
+    {
+      "name": "report a failed command as success",
+      "scenario": "Regeneration isolates parent variables and preserves review outcomes",
+      "step": "Then generated-command-environment-isolation: a generator checking for a parent-only sentinel is \"summarised\", a generator using an executable only on the parent's PATH is \"summarised\", and a generator that writes matching bytes but exits unsuccessfully is \"kept\"",
+      "files": {
+        "review/generated.go": {
+          "patch": "--- a/review/generated.go\n+++ b/review/generated.go\n@@ -170,7 +170,8 @@\n \tcmd.Dir = dir\n \tcmd.Env = []string{\"PATH=\" + os.Getenv(\"PATH\")}\n \tcmd.WaitDelay = 5 * time.Second\n-\treturn cmd.Run() == nil\n+\t_ = cmd.Run()\n+\treturn true\n }\n \n // refuseSymlinkPath returns an error when a folder of name below dir is a symlink, or, with own,\n"
+        }
+      }
+    },
+    {
+      "name": "report success without running the command",
+      "scenario": "Regeneration isolates parent variables and preserves review outcomes",
+      "step": "Then generated-command-environment-isolation: a generator checking for a parent-only sentinel is \"summarised\", a generator using an executable only on the parent's PATH is \"summarised\", and a generator that writes matching bytes but exits unsuccessfully is \"kept\"",
+      "files": {
+        "review/generated.go": {
+          "patch": "--- a/review/generated.go\n+++ b/review/generated.go\n@@ -170,7 +170,7 @@\n \tcmd.Dir = dir\n \tcmd.Env = []string{\"PATH=\" + os.Getenv(\"PATH\")}\n \tcmd.WaitDelay = 5 * time.Second\n-\treturn cmd.Run() == nil\n+\treturn true\n }\n \n // refuseSymlinkPath returns an error when a folder of name below dir is a symlink, or, with own,\n"
+        }
+      }
+    }
+  ]
+}

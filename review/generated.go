@@ -161,14 +161,14 @@ func regenerate(ctx context.Context, in Input, tree string, files []*generatedCa
 	return nil
 }
 
-// runRegenerate runs command with sh in dir, with no input and this process's environment, and
+// runRegenerate runs command with sh in dir, with no input and only the caller's PATH, and
 // reports whether it ran and exited 0 within regenerateLimit.
 func runRegenerate(ctx context.Context, dir, command string) bool {
 	ctx, cancel := context.WithTimeout(ctx, regenerateLimit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
 	cmd.WaitDelay = 5 * time.Second
 	return cmd.Run() == nil
 }
