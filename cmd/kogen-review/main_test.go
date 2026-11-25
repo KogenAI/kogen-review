@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -419,5 +420,85 @@ func TestOmittedRoleFlagsUseTheDocumentedDefaults(t *testing.T) {
 	reasoning, _ := got.body["reasoning"].(map[string]any)
 	if reasoning["effort"] != "medium" {
 		t.Errorf("reasoning.effort %v, want medium", got.body["reasoning"])
+	}
+}
+
+func TestConfinedAuthorityRefusal(t *testing.T) {
+	if os.Getenv("CONFINE_CHILD") == "1" {
+		os.Exit(run([]string{"-root", os.Getenv("CONFINE_ROOT"), "-start", "HEAD", "-slug", os.Getenv("CONFINE_SLUG"), "-model", "test"}, os.Stdout, os.Stderr))
+	}
+	for _, kind := range []string{"traversal", "intent", "feature"} {
+		t.Run(kind, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "checkout")
+			dir := filepath.Join(root, ".kogen", "intents", "tiny")
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(base, "outside")
+			if err := os.MkdirAll(outside, 0755); err != nil {
+				t.Fatal(err)
+			}
+			fifo := filepath.Join(outside, "authority")
+			if b, err := exec.Command("mkfifo", fifo).CombinedOutput(); err != nil {
+				t.Fatalf("mkfifo: %v %s", err, b)
+			}
+			intent := filepath.Join(dir, "intent.md")
+			feature := filepath.Join(dir, "acceptance.feature")
+			if err := os.WriteFile(intent, []byte("# Tiny\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(feature, []byte("Feature: Tiny\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			slug := "tiny"
+			switch kind {
+			case "traversal":
+				slug = "../../../outside"
+				if err := os.Symlink(fifo, filepath.Join(outside, "intent.md")); err != nil {
+					t.Fatal(err)
+				}
+			case "intent", "feature":
+				path := intent
+				if kind == "feature" {
+					path = feature
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(fifo, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tmp := filepath.Join(base, "tmp")
+			if err := os.Mkdir(tmp, 0755); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestConfinedAuthorityRefusal$")
+			cmd.Env = append(os.Environ(), "CONFINE_CHILD=1", "CONFINE_ROOT="+root, "CONFINE_SLUG="+slug, "TMPDIR="+tmp)
+			var out, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &stderr
+			err := cmd.Run()
+			if ctx.Err() != nil {
+				t.Fatal("blocked reading outside authority")
+			}
+			if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 2 {
+				t.Fatalf("exit %v, stdout %q stderr %q", err, out.String(), stderr.String())
+			}
+			if out.Len() != 0 || !strings.HasPrefix(stderr.String(), "kogen-review: ") || strings.Count(stderr.String(), "\n") != 1 {
+				t.Fatalf("stdout %q stderr %q", out.String(), stderr.String())
+			}
+			entries, err := os.ReadDir(tmp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "kogen-review-run-") {
+					t.Fatalf("run directory created: %v", entries)
+				}
+			}
+		})
 	}
 }

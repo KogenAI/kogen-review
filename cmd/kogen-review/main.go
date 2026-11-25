@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/KogenAI/kogen-coordinator/git"
 	"github.com/KogenAI/kogen-coordinator/project"
@@ -93,11 +94,36 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return refuse(err)
 	}
-	text, err := os.ReadFile(filepath.Join(abs, project.IntentDir(*slug), "intent.md"))
+	for _, part := range strings.Split(*slug, string(filepath.Separator)) {
+		if part == ".." {
+			return refuse(fmt.Errorf("slug contains a parent-directory component"))
+		}
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return refuse(err)
 	}
-	if _, err := os.ReadFile(filepath.Join(abs, project.FeaturePath(*slug))); err != nil {
+	pathsToRead := []string{filepath.Join(abs, project.IntentMDPath(*slug)), filepath.Join(abs, project.FeaturePath(*slug))}
+	for i, path := range pathsToRead {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return refuse(fmt.Errorf("%s: %w", path, err))
+		}
+		rel, err := filepath.Rel(resolvedRoot, resolved)
+		if err != nil {
+			return refuse(err)
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return refuse(fmt.Errorf("authority path outside checkout: %s", path))
+		}
+		pathsToRead[i] = resolved
+	}
+	text, err := os.ReadFile(pathsToRead[0])
+	if err != nil {
+		return refuse(err)
+	}
+	feature, err := os.ReadFile(pathsToRead[1])
+	if err != nil {
 		return refuse(err)
 	}
 	cfg := &project.Config{}
@@ -119,11 +145,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return refuse(fmt.Errorf("-start %s is not a commit of %s", *start, abs))
 	}
-	intent, err := project.LoadIntent(abs, *slug)
-	if err != nil {
-		return refuse(err)
-	}
-	feature, err := os.ReadFile(filepath.Join(abs, project.FeaturePath(*slug)))
+	intent, err := project.ReadIntent(abs, *slug, map[string][]byte{project.IntentMDPath(*slug): text, project.FeaturePath(*slug): feature})
 	if err != nil {
 		return refuse(err)
 	}

@@ -1,0 +1,71 @@
+{
+  "correct": {
+    "files": {
+      "cmd/kogen-review/main.go": {
+        "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -17,6 +17,7 @@\n \t\"os\"\n \t\"path/filepath\"\n \t\"slices\"\n+\t\"strings\"\n \n \t\"github.com/KogenAI/kogen-coordinator/git\"\n \t\"github.com/KogenAI/kogen-coordinator/project\"\n@@ -93,11 +94,46 @@\n \tif err != nil {\n \t\treturn refuse(err)\n \t}\n-\ttext, err := os.ReadFile(filepath.Join(abs, project.IntentDir(*slug), \"intent.md\"))\n-\tif err != nil {\n-\t\treturn refuse(err)\n-\t}\n-\tif _, err := os.ReadFile(filepath.Join(abs, project.FeaturePath(*slug))); err != nil {\n+\tfor _, part := range strings.Split(filepath.ToSlash(*slug), \"/\") {\n+\t\tif part == \"..\" || !filepath.IsLocal(*slug) {\n+\t\t\treturn refuse(fmt.Errorf(\"invalid Intent slug %q\", *slug))\n+\t\t}\n+\t}\n+\tcanonical, err := filepath.EvalSymlinks(abs)\n+\tif err != nil {\n+\t\treturn refuse(err)\n+\t}\n+\tcheckout, err := os.OpenRoot(canonical)\n+\tif err != nil {\n+\t\treturn refuse(err)\n+\t}\n+\tdefer checkout.Close()\n+\tmdPath, featurePath := project.IntentMDPath(*slug), project.FeaturePath(*slug)\n+\tresolveAuthority := func(name string) (string, error) {\n+\t\tresolved, err := filepath.EvalSymlinks(filepath.Join(abs, name))\n+\t\tif err != nil {\n+\t\t\treturn \"\", fmt.Errorf(\"%s: %w\", name, err)\n+\t\t}\n+\t\trel, err := filepath.Rel(canonical, resolved)\n+\t\tif err != nil || !filepath.IsLocal(rel) {\n+\t\t\treturn \"\", fmt.Errorf(\"%s resolves outside the checkout\", name)\n+\t\t}\n+\t\treturn rel, nil\n+\t}\n+\tmdRel, err := resolveAuthority(mdPath)\n+\tif err != nil {\n+\t\treturn refuse(err)\n+\t}\n+\tfeatureRel, err := resolveAuthority(featurePath)\n+\tif err != nil {\n+\t\treturn refuse(err)\n+\t}\n+\ttext, err := checkout.ReadFile(mdRel)\n+\tif err != nil {\n+\t\treturn refuse(err)\n+\t}\n+\tfeature, err := checkout.ReadFile(featureRel)\n+\tif err != nil {\n \t\treturn refuse(err)\n \t}\n \tcfg := &project.Config{}\n@@ -119,14 +155,11 @@\n \tif err != nil {\n \t\treturn refuse(fmt.Errorf(\"-start %s is not a commit of %s\", *start, abs))\n \t}\n-\tintent, err := project.LoadIntent(abs, *slug)\n-\tif err != nil {\n-\t\treturn refuse(err)\n-\t}\n-\tfeature, err := os.ReadFile(filepath.Join(abs, project.FeaturePath(*slug)))\n-\tif err != nil {\n-\t\treturn refuse(err)\n-\t}\n+\tintent, err := project.ReadIntent(abs, *slug, map[string][]byte{mdPath: text})\n+\tif err != nil {\n+\t\treturn refuse(err)\n+\t}\n+\tintent.Overlay = nil // Keep verification operating on the checkout as before.\n \texpected, err := project.ParseGherkin(string(feature))\n \tif err != nil {\n \t\treturn refuse(err)\n@@ -137,6 +170,11 @@\n \t}\n \thash := project.Hash(abs, paths)\n \tintact := func() error {\n+\t\tfor _, name := range []string{mdPath, featurePath} {\n+\t\t\tif _, err := resolveAuthority(name); err != nil {\n+\t\t\t\treturn err\n+\t\t\t}\n+\t\t}\n \t\tcurrent, err := project.Baseline(abs, *slug, cfg)\n \t\tif err != nil {\n \t\t\treturn err\n"
+      }
+    }
+  },
+  "wrong": [
+    {
+      "name": "Join and read the traversal slug before validating it",
+      "scenario": "Refuse a traversal slug before reading",
+      "step": "Then confine-cli-intent-paths: the command exits 2 with empty stdout before any outside authority read or verification",
+      "files": {
+        "cmd/kogen-review/main.go": {
+          "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -96,6 +96,7 @@\n \t}\n \tfor _, part := range strings.Split(filepath.ToSlash(*slug), \"/\") {\n \t\tif part == \"..\" || !filepath.IsLocal(*slug) {\n+\t\t\t_, _ = os.ReadFile(filepath.Join(abs, project.IntentMDPath(*slug)))\n \t\t\treturn refuse(fmt.Errorf(\"invalid Intent slug %q\", *slug))\n \t\t}\n \t}\n"
+        }
+      }
+    },
+    {
+      "name": "Follow the outside intent link with os.ReadFile before refusing",
+      "scenario": "Refuse an outside intent link before reading",
+      "step": "Then confine-cli-intent-paths: the command exits 2 with empty stdout before any outside authority read or verification",
+      "files": {
+        "cmd/kogen-review/main.go": {
+          "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -116,6 +116,9 @@\n \t\t}\n \t\trel, err := filepath.Rel(canonical, resolved)\n \t\tif err != nil || !filepath.IsLocal(rel) {\n+\t\t\tif name == mdPath {\n+\t\t\t\t_, _ = os.ReadFile(filepath.Join(abs, name))\n+\t\t\t}\n \t\t\treturn \"\", fmt.Errorf(\"%s resolves outside the checkout\", name)\n \t\t}\n \t\treturn rel, nil\n"
+        }
+      }
+    },
+    {
+      "name": "Follow the outside acceptance link with os.ReadFile before refusing",
+      "scenario": "Refuse an outside acceptance link before reading",
+      "step": "Then confine-cli-intent-paths: the command exits 2 with empty stdout before any outside authority read or verification",
+      "files": {
+        "cmd/kogen-review/main.go": {
+          "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -116,6 +116,9 @@\n \t\t}\n \t\trel, err := filepath.Rel(canonical, resolved)\n \t\tif err != nil || !filepath.IsLocal(rel) {\n+\t\t\tif name == featurePath {\n+\t\t\t\t_, _ = os.ReadFile(filepath.Join(abs, name))\n+\t\t\t}\n \t\t\treturn \"\", fmt.Errorf(\"%s resolves outside the checkout\", name)\n \t\t}\n \t\treturn rel, nil\n"
+        }
+      }
+    },
+    {
+      "name": "Open the leaf under a symlinked parent before checking confinement",
+      "scenario": "Refuse an outside parent link before reading",
+      "step": "Then confine-cli-intent-paths: the command exits 2 with empty stdout before any outside authority read or verification",
+      "files": {
+        "cmd/kogen-review/main.go": {
+          "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -116,6 +116,10 @@\n \t\t}\n \t\trel, err := filepath.Rel(canonical, resolved)\n \t\tif err != nil || !filepath.IsLocal(rel) {\n+\t\t\tjoined := filepath.Join(abs, name)\n+\t\t\tif fi, err := os.Lstat(joined); err == nil && fi.Mode()&os.ModeSymlink == 0 {\n+\t\t\t\t_, _ = os.ReadFile(joined)\n+\t\t\t}\n \t\t\treturn \"\", fmt.Errorf(\"%s resolves outside the checkout\", name)\n \t\t}\n \t\treturn rel, nil\n"
+        }
+      }
+    },
+    {
+      "name": "Refuse ordinary in-checkout authority paths",
+      "scenario": "Preserve review verification for ordinary authority files",
+      "step": "Then confine-cli-intent-paths: the command runs the configured setup and reports its verification failure as before",
+      "files": {
+        "cmd/kogen-review/main.go": {
+          "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -127,6 +127,9 @@\n \tfeatureRel, err := resolveAuthority(featurePath)\n \tif err != nil {\n \t\treturn refuse(err)\n+\t}\n+\tif fi, err := os.Lstat(filepath.Join(abs, mdPath)); err == nil && fi.Mode().IsRegular() {\n+\t\treturn refuse(fmt.Errorf(\"ordinary authority files are not accepted\"))\n \t}\n \ttext, err := checkout.ReadFile(mdRel)\n \tif err != nil {\n"
+        }
+      }
+    },
+    {
+      "name": "Reject symlinks even when they resolve within the checkout",
+      "scenario": "Preserve review verification for links inside the checkout",
+      "step": "Then confine-cli-intent-paths: the command runs the configured setup and reports its verification failure as before",
+      "files": {
+        "cmd/kogen-review/main.go": {
+          "patch": "--- a/cmd/kogen-review/main.go\n+++ b/cmd/kogen-review/main.go\n@@ -110,6 +110,9 @@\n \tdefer checkout.Close()\n \tmdPath, featurePath := project.IntentMDPath(*slug), project.FeaturePath(*slug)\n \tresolveAuthority := func(name string) (string, error) {\n+\t\tif fi, err := os.Lstat(filepath.Join(abs, name)); err == nil && fi.Mode()&os.ModeSymlink != 0 {\n+\t\t\treturn \"\", fmt.Errorf(\"authority links are not accepted\")\n+\t\t}\n \t\tresolved, err := filepath.EvalSymlinks(filepath.Join(abs, name))\n \t\tif err != nil {\n \t\t\treturn \"\", fmt.Errorf(\"%s: %w\", name, err)\n"
+        }
+      }
+    }
+  ]
+}
