@@ -102,6 +102,11 @@ type ProbeRun struct {
 	Refused []string `json:"refused,omitempty"`
 }
 
+type FocusRequest struct {
+	Tree        string `json:"tree"`
+	Requirement string `json:"requirement"`
+}
+
 // Submitted is one submitted verdict of a review: the pass it followed and the tree it
 // judged.
 type Submitted struct {
@@ -156,7 +161,8 @@ type Session struct {
 	Probes []string `json:"probes,omitempty"`
 	// ProbeRuns are those shell calls with the exit status the tool reported and the candidate's
 	// tree right after the call: what a probe a requirement cites is judged by.
-	ProbeRuns []ProbeRun `json:"probe_runs,omitempty"`
+	ProbeRuns      []ProbeRun     `json:"probe_runs,omitempty"`
+	FocusRequested []FocusRequest `json:"focus_requested,omitempty"`
 	// Listed are the requirement texts of the submissions of this review that were accepted (a
 	// refused submission lists nothing), one text per identity (the text without leading and
 	// trailing whitespace, each run of whitespace as one space, letter case ignored) in its first
@@ -452,7 +458,7 @@ func (r *run) retry(ctx context.Context) (Result, error) {
 	feedback = delivery + feedback
 	r.pass = pass
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: true, Repaired: r.sess.Repaired, Seen: pass.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, FocusRequested: r.sess.FocusRequested, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS, StudioRules: r.sess.StudioRules,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
@@ -544,6 +550,21 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 		"verdict": verdict.Verdict, "findings": findings, "tree": tree, "attempts": attempts,
 		"requirements": core.NonNil(verdict.Requirements),
 	}
+	var unverified []map[string]string
+	if verdict.Verdict == "changes" && !r.external {
+		for _, q := range verdict.Requirements {
+			if !q.Met && q.Evidence == "none" {
+				state, _, err := r.focusState(tree)
+				if err != nil {
+					return Result{}, false, err
+				}
+				unverified = append(unverified, map[string]string{"requirement": q.Requirement, "check": state})
+			}
+		}
+		if len(unverified) > 0 {
+			file["unverified"] = unverified
+		}
+	}
 	if verdict.Dropped != nil {
 		file["dropped"] = verdict.Dropped
 	}
@@ -560,6 +581,9 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 			"the reviewer could not resolve a substantive blocker within the approved Intent; edits are left in place", 1)
 		for _, line := range blockerLines(findings) {
 			e.Lines = append(e.Lines, "review: "+line)
+		}
+		for _, u := range unverified {
+			e.Lines = append(e.Lines, `review: unverified requirement "`+u["requirement"]+`": focused check `+u["check"])
 		}
 		return Result{Record: review, Pass: r.pass, Repairs: r.sess.RepairRounds, Environment: r.environment()}, false, e
 	}
@@ -645,7 +669,7 @@ func (r *run) evaluate(ctx context.Context, verdict Verdict, tree string) (res R
 	}
 	r.pass = final
 	r.sess = Session{
-		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
+		Role: r.sess.Role, Usage: r.sess.Usage, Requests: r.sess.Requests, Attempts: attempts, NoTool: r.sess.NoTool, Restored: r.sess.Restored, ProseTurns: r.sess.ProseTurns, ForcedRequests: r.sess.ForcedRequests, ForcedAnswered: r.sess.ForcedAnswered, Reopened: r.sess.Reopened, Repaired: true, Seen: final.Tree, Probes: r.sess.Probes, ProbeRuns: r.sess.ProbeRuns, Listed: r.sess.Listed, FocusRequested: r.sess.FocusRequested, RepairRounds: r.sess.RepairRounds, FailureIdentities: r.sess.FailureIdentities, FailureStreak: r.sess.FailureStreak,
 		Windows: r.sess.Windows, ResetUnread: r.sess.ResetUnread, Blockers: r.sess.Blockers, WallMS: r.sess.WallMS, StudioRules: r.sess.StudioRules,
 		Input: slices.Concat(r.sess.Input, []any{map[string]any{"role": "user", "content": feedback}}),
 	}
@@ -849,6 +873,7 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 		var outs []any
 		var verdict *Verdict
 		var problems []string
+		focusExempt := false
 		for i := range calls {
 			call := calls[i]
 			if err := env.Err(); err != nil {
@@ -870,7 +895,9 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 				// No verdict exists after a refusal: only reads run, any other call is made again.
 				outs = append(outs, call.Output("not run: the submission was refused; make this call again in the next response"))
 			case call.Name == SubmitReviewTool:
+				beforeFocus := len(r.sess.FocusRequested)
 				v, probs, err := r.validate(call.Args(), input)
+				focusExempt = len(r.sess.FocusRequested) > beforeFocus
 				if err != nil {
 					return Verdict{}, err
 				}
@@ -970,6 +997,8 @@ func (r *run) converse(ctx context.Context) (Verdict, error) {
 			prevUnread, r.sess.PrevUnread = n, n
 		}
 		switch {
+		case problems != nil && focusExempt:
+			// A focused-check request does not consume the rejected verdict allowance.
 		case problems != nil && exempt:
 			// Progress on unread parts spends neither allowance.
 			r.allowance("unread_progress_exempt", nil)
@@ -1117,6 +1146,47 @@ func (r *run) validate(args map[string]any, input []any) (*Verdict, []string, er
 	}
 	if problems != nil {
 		return nil, problems, nil
+	}
+	if verdict == "changes" && !r.external {
+		state, tree, err := r.focusState("")
+		if err != nil {
+			return nil, nil, err
+		}
+		var unmet []Requirement
+		only := state == "unavailable"
+		for _, q := range requirements {
+			if !q.Met {
+				unmet = append(unmet, q)
+				if q.Evidence != "none" {
+					only = false
+				}
+			}
+		}
+		for _, f := range findings {
+			if f["severity"] == "blocking" {
+				quoted := false
+				for _, q := range unmet {
+					if quotes([]map[string]any{f}, q.Requirement) {
+						quoted = true
+						break
+					}
+				}
+				if !quoted {
+					only = false
+				}
+			}
+		}
+		if only && len(unmet) > 0 {
+			for _, q := range unmet {
+				if !slices.ContainsFunc(r.sess.FocusRequested, func(f FocusRequest) bool { return f.Tree == tree && identity(f.Requirement) == identity(q.Requirement) }) {
+					r.sess.FocusRequested = append(r.sess.FocusRequested, FocusRequest{Tree: tree, Requirement: q.Requirement})
+					problems = append(problems, `requirement "`+q.Requirement+`" has no evidence, and that is the only ground of this changes verdict: no focused check of the candidate has run in this review and no tool or environment limitation is recorded. A missing check is unverified, not a defect of the candidate. Run one focused check of this requirement with shell on the current tree and cite its exact command, or, when it cannot safely run here, submit the same changes verdict with a blocking finding that states the concrete reason it cannot run`)
+				}
+			}
+			if len(problems) > 0 {
+				return nil, problems, nil
+			}
+		}
 	}
 	for _, q := range requirements {
 		if !slices.ContainsFunc(r.sess.Listed, func(l string) bool { return identity(l) == identity(q.Requirement) }) {
@@ -1385,6 +1455,34 @@ func (e *evidenceCheck) current() (string, error) {
 		e.tree, e.read = tree, true
 	}
 	return e.tree, nil
+}
+
+// focusState describes the review's recorded checks against the judged tree.
+func (r *run) focusState(tree string) (string, string, error) {
+	e := &evidenceCheck{r: r}
+	if tree == "" {
+		var err error
+		tree, err = e.current()
+		if err != nil {
+			return "", "", err
+		}
+	}
+	e.tree, e.read = tree, true
+	for _, p := range r.sess.ProbeRuns {
+		if len(p.Refused) > 0 {
+			return "refused", tree, nil
+		}
+	}
+	for _, p := range r.sess.ProbeRuns {
+		named, err := e.names(p.Command)
+		if err != nil {
+			return "", "", err
+		}
+		if named {
+			return "attempted", tree, nil
+		}
+	}
+	return "unavailable", tree, nil
 }
 
 // names reports whether command names a file of the current tree, or a directory holding one.

@@ -521,3 +521,16 @@ func TestSharedTestSupportLineOnceOnResetAndPartsRoutes(t *testing.T) {
 	eq(t, "parts line before the diff", strings.Count(text, line), 1)
 	eq(t, "parts rule count", strings.Count(fake.tasks[0].Brief.Stable, review.SharedTestSupportRule), 1)
 }
+
+func TestFocusRequestSurvivesReset(t *testing.T) {
+	in, h := newCeilingReview(t, 1000)
+	h.readAll = true
+	const objection = `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"R1 is unverified"}],"requirements":[{"requirement":"R1","evidence":"none","ref":"","met":false}]}`
+	h.answers = []*provider.Response{submitReview(objection), filler(call("read", "read_file", `{"path":"app.txt"}`)), submitReview(objection)}
+	_, err := review.Independent{}.Review(context.Background(), in, h)
+	wantError(t, "stop", err, "candidate", "review_blocked")
+	eq(t, "reset refusals", len(h.refusals), 1)
+	for _, s := range h.sessions[1:] {
+		deepEq(t, "focus retained", s.FocusRequested, []review.FocusRequest{{Tree: greenTree, Requirement: "R1"}})
+	}
+}

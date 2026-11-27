@@ -171,7 +171,7 @@ func TestValidateChecksTheRequirementsOfAVerdict(t *testing.T) {
 		{approve(`[` + entry("probe", "sh probe.sh", "true") + `]`), []any{probeCall}, namesNothing, 0},
 		{approve(`[` + entry("acceptance", "a", "true") + `]`), nil, notRun, 0},
 		{approve(`[` + entry("test", "t", "true") + `]`), nil, "", 1},
-		{changes(blocking("R1 is missing"), `[`+entry("none", "", "false")+`]`), nil, "", 1},
+		{changes(blocking("R1 is missing"), `[`+entry("none", "", "false")+`]`), nil, `requirement "R1" has no evidence, and that is the only ground of this changes verdict: no focused check of the candidate has run in this review and no tool or environment limitation is recorded. A missing check is unverified, not a defect of the candidate. Run one focused check of this requirement with shell on the current tree and cite its exact command, or, when it cannot safely run here, submit the same changes verdict with a blocking finding that states the concrete reason it cannot run`, 0},
 		{changes(blocking("R1 is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, "", 1},
 		{changes(blocking("it is missing"), `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, unquoted, 0},
 		{changes(note, `[`+entry("probe", "sh probe.sh", "false")+`]`), nil, needBlocking + unquoted, 0},

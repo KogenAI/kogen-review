@@ -975,3 +975,51 @@ func TestIndependentReviewAccountsForBinaryAndModeOnlyRepairs(t *testing.T) {
 		})
 	}
 }
+
+func TestFocusRequestOnceAndUnverified(t *testing.T) {
+	in, h := newReview(t)
+	const objection = `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"R1 is unverified"}],"requirements":[{"requirement":"R1","evidence":"none","ref":"","met":false}]}`
+	h.answers = []*provider.Response{submitReview(objection), submitReview(objection)}
+	_, err := (review.Independent{}).Review(context.Background(), in, h)
+	wantError(t, "focus stop", err, "candidate", "review_blocked")
+	eq(t, "focus requests", len(h.requests), 2)
+	if !strings.Contains(lastOutput(h.requests[1]), "no focused check of the candidate") {
+		t.Fatal("missing focus request")
+	}
+	s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deepEq(t, "focus checkpoint", s.FocusRequested, []review.FocusRequest{{Tree: greenTree, Requirement: "R1"}})
+	eq(t, "focus allowance", s.Rejected, 0)
+	rec := readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
+	deepEq(t, "unverified", rec["unverified"], any([]any{map[string]any{"requirement": "R1", "check": "unavailable"}}))
+}
+
+func TestFocusMultipleAndAttempted(t *testing.T) {
+	const objection = `{"verdict":"changes","findings":[{"path":"app.txt","line":1,"severity":"blocking","message":"R1 and R2 are unverified"}],"requirements":[{"requirement":"R1","evidence":"none","ref":"","met":false},{"requirement":"R2","evidence":"none","ref":"","met":false}]}`
+	t.Run("multiple", func(t *testing.T) {
+		in, h := newReview(t)
+		h.answers = []*provider.Response{submitReview(objection), submitReview(objection)}
+		_, err := (review.Independent{}).Review(context.Background(), in, h)
+		wantError(t, "stop", err, "candidate", "review_blocked")
+		out := lastOutput(h.requests[1])
+		if !strings.Contains(out, `requirement "R1"`) || !strings.Contains(out, `requirement "R2"`) {
+			t.Fatal(out)
+		}
+		s, err := review.DecodeSession(h.saves[len(h.saves)-1].Session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		deepEq(t, "requests", s.FocusRequested, []review.FocusRequest{{Tree: greenTree, Requirement: "R1"}, {Tree: greenTree, Requirement: "R2"}})
+	})
+	t.Run("attempted", func(t *testing.T) {
+		in, h := newReview(t)
+		h.answers = []*provider.Response{answer(call("p", "shell", `{"command":"cat app.txt"}`), call("s", "submit_review", objection))}
+		_, err := (review.Independent{}).Review(context.Background(), in, h)
+		wantError(t, "stop", err, "candidate", "review_blocked")
+		eq(t, "no request", len(h.requests), 1)
+		rec := readJSON(t, filepath.Join(in.Run.Dir, review.File(1)))
+		deepEq(t, "attempted", rec["unverified"], any([]any{map[string]any{"requirement": "R1", "check": "attempted"}, map[string]any{"requirement": "R2", "check": "attempted"}}))
+	})
+}
